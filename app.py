@@ -7,6 +7,7 @@ import google.genai as genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError
 import streamlit as st
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 st.set_page_config(
     page_title="Agentic Study Platform", page_icon="🎓", layout="wide"
@@ -20,7 +21,7 @@ CHAT_MODELS = [
     "gemini-2.5-pro",
     "gemini-2.0-flash-lite",
 ]
-NOTEBOOK_MODEL = "gemini-2.5-pro"  # Default model for source document analysis
+NOTEBOOK_MODEL = "gemini-2.5-pro"
 
 
 # --- DEFENSIVE DATA LOADING ---
@@ -99,21 +100,31 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-def generate_chat_title(client, model, user_prompt):
-  """Generates a concise 3-5 word topic title based on first user prompt."""
-  try:
-    title_prompt = (
-        "Summarize the following prompt into a brief, descriptive 3 to 5 word chat title. "
-        "Do not use quotes or punctuation.\n\nPrompt: " + user_prompt
-    )
-    res = client.models.generate_content(
-        model=model,
-        contents=title_prompt,
-    )
-    clean_title = res.text.strip().replace('"', "").replace("'", "")
-    return clean_title[:30] if clean_title else "New Study Chat"
-  except Exception:
-    return f"Chat {datetime.now().strftime('%b %d %H:%M')}"
+def generate_offline_title(user_prompt):
+  """Offline title generation to prevent 429 Rate Limit consumption."""
+  clean_text = (
+      user_prompt.strip()
+      .replace("\n", " ")
+      .replace('"', "")
+      .replace("'", "")
+  )
+  words = clean_text.split()
+  if len(words) <= 5:
+    return clean_text[:30]
+  return " ".join(words[:5]) + "..."
+
+
+# --- RETRY WRAPPER FOR API CALLS ---
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((ClientError, APIError)),
+)
+def safe_generate_content(client, model, contents, config=None):
+  return client.models.generate_content(
+      model=model, contents=contents, config=config
+  )
 
 
 # --- SIDEBAR: CONFIGURATION & NAVIGATION ---
@@ -211,7 +222,6 @@ if st.session_state.active_mode == "general_chat":
   col_head1, col_head2 = st.columns([3, 1])
   col_head1.title(f"💬 {st.session_state.active_chat}")
 
-  # Model selector placed inside the general chat interface
   selected_model = col_head2.selectbox(
       "🤖 Select Chat Model",
       CHAT_MODELS,
@@ -288,7 +298,7 @@ if st.session_state.active_mode == "general_chat":
 
   if user_query:
     if len(chat_history) == 0:
-      auto_title = generate_chat_title(client, selected_model, user_query)
+      auto_title = generate_offline_title(user_query)
       old_chat_key = st.session_state.active_chat
       st.session_state.db["chats"][auto_title] = st.session_state.db[
           "chats"
@@ -346,7 +356,16 @@ if st.session_state.active_mode == "general_chat":
         save_data(st.session_state.db)
       except (ClientError, APIError) as e:
         status_box.empty()
-        st.error(f"Gemini API Error: {str(e)}")
+        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+          st.warning(
+              "⚠️ Rate limit reached on Free Tier. Pausing briefly before retrying..."
+          )
+          time.sleep(5)
+          st.experimental_rerun() if hasattr(
+              st, "experimental_rerun"
+          ) else st.rerun()
+        else:
+          st.error(f"Gemini API Error: {str(e)}")
 
 # ==========================================
 # VIEW 2: NOTEBOOK WORKSPACES
@@ -472,9 +491,10 @@ elif st.session_state.active_mode == "notebook_studio":
                 " format:"
                 " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
             )
-            res = client.models.generate_content(
-                model=NOTEBOOK_MODEL,
-                contents=prompt,
+            res = safe_generate_content(
+                client,
+                NOTEBOOK_MODEL,
+                prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json"
                 ),
@@ -684,9 +704,10 @@ elif st.session_state.active_mode == "notebook_studio":
                 f" Essay: {essay}. Output JSON:"
                 " {'score':'80%','weakness':'...','strategy':'...'}"
             )
-            res = client.models.generate_content(
-                model=NOTEBOOK_MODEL,
-                contents=prompt,
+            res = safe_generate_content(
+                client,
+                NOTEBOOK_MODEL,
+                prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json"
                 ),
