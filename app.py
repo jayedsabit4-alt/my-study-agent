@@ -45,7 +45,7 @@ def save_data(data):
     json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# --- SESSION STATE INITIALIZATION ---
+# --- INITIALIZE STATE ---
 if "db" not in st.session_state:
   st.session_state.db = load_data()
 
@@ -75,7 +75,7 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-# --- SIDEBAR: GEMINI GENERAL CHAT & NAVIGATION ---
+# --- SIDEBAR: GEMINI GENERAL CHAT & BACKUP SYSTEM ---
 with st.sidebar:
   st.title("🎓 Gemini + Notebook Studio")
 
@@ -85,6 +85,39 @@ with st.sidebar:
     st.stop()
 
   client = genai.Client(api_key=api_key)
+
+  st.divider()
+
+  # PERSISTENCE BACKUP / RESTORE CONTROLS
+  with st.expander("💾 Backup & Restore Data", expanded=False):
+    st.caption(
+        "Save or load your persistent study data across Cloud server resets."
+    )
+
+    # Download Backup
+    json_bytes = json.dumps(
+        st.session_state.db, ensure_ascii=False, indent=2
+    ).encode("utf-8")
+    st.download_button(
+        "📥 Download Backup File",
+        data=json_bytes,
+        file_name="study_data_backup.json",
+        mime="application/json",
+    )
+
+    # Restore Backup
+    uploaded_backup = st.file_uploader(
+        "Upload Backup JSON", type=["json"], key="backup_restore"
+    )
+    if st.button("Restore Backup") and uploaded_backup:
+      try:
+        restored_data = json.load(uploaded_backup)
+        st.session_state.db = restored_data
+        save_data(restored_data)
+        st.success("Data successfully restored!")
+        st.rerun()
+      except Exception as e:
+        st.error(f"Error loading file: {e}")
 
   st.divider()
 
@@ -121,12 +154,6 @@ with st.sidebar:
 if st.session_state.active_mode == "general_chat":
   st.title(f"💬 {st.session_state.active_chat}")
 
-  gen_lang = st.selectbox(
-      "Chat Output Language / ভাষা",
-      ["English", "Bengali (বাংলা)"],
-      key="gen_lang_select",
-  )
-
   chat_history = st.session_state.db["chats"].get(
       st.session_state.active_chat, []
   )
@@ -148,8 +175,8 @@ if st.session_state.active_mode == "general_chat":
       st.markdown(user_query)
 
     sys_inst = (
-        f"You are a general study assistant. Respond in {gen_lang}. Use LaTeX"
-        " ($ or $$) for math formulas."
+        "You are a general study assistant. Respond in the user's preferred"
+        " language. Use LaTeX ($ or $$) for math formulas."
     )
     contents = [user_query]
 
@@ -170,7 +197,7 @@ if st.session_state.active_mode == "general_chat":
       save_data(st.session_state.db)
 
 # ==========================================
-# VIEW 2: NOTEBOOK WORKSPACES (MCQ & WRITTEN)
+# VIEW 2: NOTEBOOK WORKSPACES
 # ==========================================
 elif st.session_state.active_mode == "notebook_studio":
   st.title("📚 Notebook Workspaces")
@@ -187,14 +214,14 @@ elif st.session_state.active_mode == "notebook_studio":
   if workspace_type == "📝 MCQ Workspace":
     st.subheader("📝 MCQ Subjects Studio")
 
-    col_s1, col_s2 = st.columns([3, 1])
+    col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
     mcq_subs = list(st.session_state.db["mcq_subjects"].keys())
     selected_mcq_sub = col_s1.selectbox(
         "Select MCQ Subject", mcq_subs if mcq_subs else ["None"]
     )
 
-    new_mcq_sub = col_s2.text_input("Create New MCQ Subject")
-    if col_s2.button("Add MCQ Subject") and new_mcq_sub:
+    new_mcq_sub = col_s2.text_input("Create MCQ Subject")
+    if col_s2.button("Add Subject") and new_mcq_sub:
       if new_mcq_sub not in st.session_state.db["mcq_subjects"]:
         st.session_state.db["mcq_subjects"][new_mcq_sub] = {
             "sources": [],
@@ -205,15 +232,16 @@ elif st.session_state.active_mode == "notebook_studio":
         st.success(f"Added {new_mcq_sub}")
         st.rerun()
 
+    # Subject Delete Button
+    if selected_mcq_sub and selected_mcq_sub != "None":
+      if col_s3.button("🗑️ Delete Subject", key=f"del_sub_mcq_{selected_mcq_sub}"):
+        del st.session_state.db["mcq_subjects"][selected_mcq_sub]
+        save_data(st.session_state.db)
+        st.warning(f"Deleted {selected_mcq_sub}")
+        st.rerun()
+
     if selected_mcq_sub and selected_mcq_sub != "None":
       sub_data = st.session_state.db["mcq_subjects"][selected_mcq_sub]
-
-      # Subject Language Selection
-      mcq_lang = st.selectbox(
-          f"Output Language for Subject '{selected_mcq_sub}'",
-          ["English", "Bengali (বাংলা)"],
-          key=f"mcq_lang_{selected_mcq_sub}",
-      )
 
       with st.expander(
           "📁 Import / Manage Subject Source Documents", expanded=False
@@ -249,9 +277,8 @@ elif st.session_state.active_mode == "notebook_studio":
         with c2:
           timer_m = st.number_input("Practice Timer (Minutes)", 1, 120, 10)
 
-        # Custom Instructions / Prompt Guidance
         mcq_custom_inst = st.text_area(
-            "📌 Custom Evaluation & Question Generation Instructions",
+            "📌 Custom Evaluation & Generation Instructions",
             placeholder=(
                 "e.g., Focus on Chapter 3 formulas, clinical scenarios,"
                 " negative marking rules..."
@@ -263,8 +290,8 @@ elif st.session_state.active_mode == "notebook_studio":
           prompt = (
               f"Generate {num_q} MCQs for subject '{selected_mcq_sub}'."
               f" Difficulty: {diff}. Specific Instructions:"
-              f" {mcq_custom_inst}. Language: {mcq_lang}. Sources context:"
-              f" {sub_data['sources']}. Return strictly JSON format:"
+              f" {mcq_custom_inst}. Context: {sub_data['sources']}. Return"
+              " strictly JSON format:"
               " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
           )
           res = client.models.generate_content(
@@ -327,8 +354,8 @@ elif st.session_state.active_mode == "notebook_studio":
               contents=q_in,
               config=types.GenerateContentConfig(
                   system_instruction=(
-                      f"Answer for {selected_mcq_sub} in {mcq_lang} based on"
-                      f" sources: {sub_data['sources']}"
+                      f"Answer for {selected_mcq_sub} based on sources:"
+                      f" {sub_data['sources']}"
                   )
               ),
           )
@@ -342,7 +369,7 @@ elif st.session_state.active_mode == "notebook_studio":
           col_m1, col_m2 = st.columns([5, 1])
           col_m1.write(f"- **{m['concept']}**: {m['takeaway']}")
           if col_m2.button(
-              "Delete", key=f"del_mcq_{selected_mcq_sub}_{idx}"
+              "Delete Entry", key=f"del_mcq_{selected_mcq_sub}_{idx}"
           ):
             sub_data["mistakes"].pop(idx)
             save_data(st.session_state.db)
@@ -361,14 +388,14 @@ elif st.session_state.active_mode == "notebook_studio":
   elif workspace_type == "✍️ Focus Written Workspace":
     st.subheader("✍️ Focus Written Subjects Studio")
 
-    col_w1, col_w2 = st.columns([3, 1])
+    col_w1, col_w2, col_w3 = st.columns([2, 1, 1])
     w_subs = list(st.session_state.db["written_subjects"].keys())
     selected_w_sub = col_w1.selectbox(
         "Select Written Subject", w_subs if w_subs else ["None"]
     )
 
-    new_w_sub = col_w2.text_input("Create New Written Subject")
-    if col_w2.button("Add Written Subject") and new_w_sub:
+    new_w_sub = col_w2.text_input("Create Written Subject")
+    if col_w2.button("Add Subject") and new_w_sub:
       if new_w_sub not in st.session_state.db["written_subjects"]:
         st.session_state.db["written_subjects"][new_w_sub] = {
             "sources": [],
@@ -379,15 +406,16 @@ elif st.session_state.active_mode == "notebook_studio":
         st.success(f"Added {new_w_sub}")
         st.rerun()
 
+    # Subject Delete Button
+    if selected_w_sub and selected_w_sub != "None":
+      if col_w3.button("🗑️ Delete Subject", key=f"del_sub_w_{selected_w_sub}"):
+        del st.session_state.db["written_subjects"][selected_w_sub]
+        save_data(st.session_state.db)
+        st.warning(f"Deleted {selected_w_sub}")
+        st.rerun()
+
     if selected_w_sub and selected_w_sub != "None":
       w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
-
-      # Subject Language Selection
-      w_lang = st.selectbox(
-          f"Output Language for Subject '{selected_w_sub}'",
-          ["English", "Bengali (বাংলা)"],
-          key=f"w_lang_{selected_w_sub}",
-      )
 
       with st.expander(
           "📁 Import / Manage Subject Source Documents", expanded=False
@@ -416,12 +444,11 @@ elif st.session_state.active_mode == "notebook_studio":
       with w_t1:
         target_benchmark = st.text_area("Benchmark Writing Sample")
 
-        # Custom Instructions for Essay Evaluation
         written_custom_inst = st.text_area(
             "📌 Custom Evaluation Guidelines / Rubrics",
             placeholder=(
-                "e.g., Grade strictly according to university standard,"
-                " highlight grammatical passives, check for thesis clarity..."
+                "e.g., Grade strictly according to academic standard,"
+                " highlight passive voice, check thesis clarity..."
             ),
             key=f"inst_w_{selected_w_sub}",
         )
@@ -431,7 +458,7 @@ elif st.session_state.active_mode == "notebook_studio":
           prompt = (
               f"Evaluate essay for '{selected_w_sub}'. Benchmark:"
               f" {target_benchmark}. Custom Guidelines: {written_custom_inst}."
-              f" Essay: {essay}. Language: {w_lang}. Output JSON:"
+              f" Essay: {essay}. Output JSON:"
               " {'score':'80%','weakness':'...','strategy':'...'}"
           )
           res = client.models.generate_content(
@@ -463,8 +490,8 @@ elif st.session_state.active_mode == "notebook_studio":
               contents=wq_in,
               config=types.GenerateContentConfig(
                   system_instruction=(
-                      f"Answer for {selected_w_sub} in {w_lang} using"
-                      f" sources: {w_sub_data['sources']}"
+                      f"Answer for {selected_w_sub} using sources:"
+                      f" {w_sub_data['sources']}"
                   )
               ),
           )
@@ -477,7 +504,7 @@ elif st.session_state.active_mode == "notebook_studio":
         for idx, w in enumerate(w_sub_data.get("mistakes", [])):
           col_w1, col_w2 = st.columns([5, 1])
           col_w1.write(f"- **{w['area']}**: {w['correction']}")
-          if col_w2.button("Delete", key=f"del_w_{selected_w_sub}_{idx}"):
+          if col_w2.button("Delete Entry", key=f"del_w_{selected_w_sub}_{idx}"):
             w_sub_data["mistakes"].pop(idx)
             save_data(st.session_state.db)
             st.rerun()
