@@ -37,6 +37,15 @@ def load_data():
         "Academic Essay": {"sources": [], "chat": [], "mistakes": []}
     }
 
+  # Clean up empty/unprompted unused chats automatically
+  empty_chats = [
+      k
+      for k, v in data["chats"].items()
+      if len(v) == 0 and k != "Default Chat"
+  ]
+  for ec in empty_chats:
+    del data["chats"][ec]
+
   return data
 
 
@@ -75,7 +84,7 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-# --- SIDEBAR: GEMINI GENERAL CHAT & BACKUP SYSTEM ---
+# --- SIDEBAR: NAVIGATION & CHAT THREAD MANAGEMENT ---
 with st.sidebar:
   st.title("🎓 Gemini + Notebook Studio")
 
@@ -85,39 +94,6 @@ with st.sidebar:
     st.stop()
 
   client = genai.Client(api_key=api_key)
-
-  st.divider()
-
-  # PERSISTENCE BACKUP / RESTORE CONTROLS
-  with st.expander("💾 Backup & Restore Data", expanded=False):
-    st.caption(
-        "Save or load your persistent study data across Cloud server resets."
-    )
-
-    # Download Backup
-    json_bytes = json.dumps(
-        st.session_state.db, ensure_ascii=False, indent=2
-    ).encode("utf-8")
-    st.download_button(
-        "📥 Download Backup File",
-        data=json_bytes,
-        file_name="study_data_backup.json",
-        mime="application/json",
-    )
-
-    # Restore Backup
-    uploaded_backup = st.file_uploader(
-        "Upload Backup JSON", type=["json"], key="backup_restore"
-    )
-    if st.button("Restore Backup") and uploaded_backup:
-      try:
-        restored_data = json.load(uploaded_backup)
-        st.session_state.db = restored_data
-        save_data(restored_data)
-        st.success("Data successfully restored!")
-        st.rerun()
-      except Exception as e:
-        st.error(f"Error loading file: {e}")
 
   st.divider()
 
@@ -136,17 +112,36 @@ with st.sidebar:
   if st.session_state.active_mode == "general_chat":
     col_c1, col_c2 = st.columns([3, 1])
     col_c1.subheader("💬 Chat Threads")
-    if col_c2.button("➕", key="new_chat"):
-      new_chat_name = f"Chat {datetime.now().strftime('%b %d %H:%M')}"
-      st.session_state.db["chats"][new_chat_name] = []
-      save_data(st.session_state.db)
-      st.session_state.active_chat = new_chat_name
-      st.rerun()
 
+    # Only create a new chat if previous active chat is non-empty
+    if col_c2.button("➕", key="new_chat"):
+      current_chat_content = st.session_state.db["chats"].get(
+          st.session_state.active_chat, []
+      )
+      if len(current_chat_content) > 0 or len(st.session_state.db["chats"]) == 0:
+        new_chat_name = f"Chat {datetime.now().strftime('%b %d %H:%M')}"
+        st.session_state.db["chats"][new_chat_name] = []
+        save_data(st.session_state.db)
+        st.session_state.active_chat = new_chat_name
+        st.rerun()
+
+    # List Chat Threads with Delete Buttons
     for chat_name in list(st.session_state.db["chats"].keys()):
-      if st.button(f"🗨️ {chat_name[:20]}", key=f"chat_{chat_name}"):
+      col_btn, col_del = st.columns([4, 1])
+      if col_btn.button(
+          f"🗨️ {chat_name[:15]}", key=f"chat_select_{chat_name}"
+      ):
         st.session_state.active_chat = chat_name
         st.rerun()
+
+      if len(st.session_state.db["chats"]) > 1:
+        if col_del.button("🗑️", key=f"del_chat_{chat_name}"):
+          del st.session_state.db["chats"][chat_name]
+          st.session_state.active_chat = list(
+              st.session_state.db["chats"].keys()
+          )[0]
+          save_data(st.session_state.db)
+          st.rerun()
 
 # ==========================================
 # VIEW 1: GEMINI GENERAL CHAT
@@ -232,9 +227,11 @@ elif st.session_state.active_mode == "notebook_studio":
         st.success(f"Added {new_mcq_sub}")
         st.rerun()
 
-    # Subject Delete Button
+    # Subject Delete Option
     if selected_mcq_sub and selected_mcq_sub != "None":
-      if col_s3.button("🗑️ Delete Subject", key=f"del_sub_mcq_{selected_mcq_sub}"):
+      if col_s3.button(
+          "🗑️ Delete Subject", key=f"del_sub_mcq_{selected_mcq_sub}"
+      ):
         del st.session_state.db["mcq_subjects"][selected_mcq_sub]
         save_data(st.session_state.db)
         st.warning(f"Deleted {selected_mcq_sub}")
@@ -278,7 +275,7 @@ elif st.session_state.active_mode == "notebook_studio":
           timer_m = st.number_input("Practice Timer (Minutes)", 1, 120, 10)
 
         mcq_custom_inst = st.text_area(
-            "📌 Custom Evaluation & Generation Instructions",
+            "📌 Custom Evaluation & Question Generation Instructions",
             placeholder=(
                 "e.g., Focus on Chapter 3 formulas, clinical scenarios,"
                 " negative marking rules..."
@@ -406,7 +403,7 @@ elif st.session_state.active_mode == "notebook_studio":
         st.success(f"Added {new_w_sub}")
         st.rerun()
 
-    # Subject Delete Button
+    # Subject Delete Option
     if selected_w_sub and selected_w_sub != "None":
       if col_w3.button("🗑️ Delete Subject", key=f"del_sub_w_{selected_w_sub}"):
         del st.session_state.db["written_subjects"][selected_w_sub]
