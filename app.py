@@ -88,7 +88,6 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
 with st.sidebar:
   st.title("🎓 Gemini + Notebook Studio")
 
-  # Default API key from secrets if available, editable by user
   default_key = st.secrets.get(
       "GEMINI_API_KEY", st.session_state.get("saved_api_key", "")
   )
@@ -156,7 +155,7 @@ with st.sidebar:
           st.rerun()
 
 # ==========================================
-# VIEW 1: GEMINI GENERAL CHAT
+# VIEW 1: GEMINI GENERAL CHAT (STREAMING ENABLED)
 # ==========================================
 if st.session_state.active_mode == "general_chat":
   st.title(f"💬 {st.session_state.active_chat}")
@@ -205,13 +204,19 @@ if st.session_state.active_mode == "general_chat":
         contents.append(uploaded_part)
 
     with st.chat_message("assistant"):
-      res = client.models.generate_content(
-          model="gemini-3.5-flash",
-          contents=contents,
-          config=types.GenerateContentConfig(system_instruction=sys_inst),
-      )
-      st.markdown(res.text)
-      chat_history.append({"role": "assistant", "content": res.text})
+
+      def stream_response():
+        response_stream = client.models.generate_content_stream(
+            model="gemini-3.5-flash",
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=sys_inst),
+        )
+        for chunk in response_stream:
+          if chunk.text:
+            yield chunk.text
+
+      full_res = st.write_stream(stream_response)
+      chat_history.append({"role": "assistant", "content": full_res})
       st.session_state.db["chats"][st.session_state.active_chat] = chat_history
       save_data(st.session_state.db)
 
@@ -394,19 +399,29 @@ elif st.session_state.active_mode == "notebook_studio":
         q_in = st.chat_input(f"Ask about {selected_mcq_sub}...")
         if q_in:
           sub_data["chat"].append({"role": "user", "content": q_in})
-          res = client.models.generate_content(
-              model="gemini-3.5-flash",
-              contents=q_in,
-              config=types.GenerateContentConfig(
-                  system_instruction=(
-                      f"Answer for {selected_mcq_sub} based on sources:"
-                      f" {sub_data['sources']}"
-                  )
-              ),
-          )
-          sub_data["chat"].append({"role": "assistant", "content": res.text})
-          save_data(st.session_state.db)
-          st.rerun()
+          with st.chat_message("user"):
+            st.markdown(q_in)
+
+          with st.chat_message("assistant"):
+
+            def stream_mcq_chat():
+              response_stream = client.models.generate_content_stream(
+                  model="gemini-3.5-flash",
+                  contents=q_in,
+                  config=types.GenerateContentConfig(
+                      system_instruction=(
+                          f"Answer for {selected_mcq_sub} based on sources:"
+                          f" {sub_data['sources']}"
+                      )
+                  ),
+              )
+              for chunk in response_stream:
+                if chunk.text:
+                  yield chunk.text
+
+            res_text = st.write_stream(stream_mcq_chat)
+            sub_data["chat"].append({"role": "assistant", "content": res_text})
+            save_data(st.session_state.db)
 
       with m_tab3:
         st.write("### Recorded Mistake Entries")
@@ -555,19 +570,29 @@ elif st.session_state.active_mode == "notebook_studio":
         wq_in = st.chat_input(f"Ask about writing in {selected_w_sub}...")
         if wq_in:
           w_sub_data["chat"].append({"role": "user", "content": wq_in})
-          res = client.models.generate_content(
-              model="gemini-3.5-flash",
-              contents=wq_in,
-              config=types.GenerateContentConfig(
-                  system_instruction=(
-                      f"Answer for {selected_w_sub} using sources:"
-                      f" {w_sub_data['sources']}"
-                  )
-              ),
-          )
-          w_sub_data["chat"].append({"role": "assistant", "content": res.text})
-          save_data(st.session_state.db)
-          st.rerun()
+          with st.chat_message("user"):
+            st.markdown(wq_in)
+
+          with st.chat_message("assistant"):
+
+            def stream_w_chat():
+              response_stream = client.models.generate_content_stream(
+                  model="gemini-3.5-flash",
+                  contents=wq_in,
+                  config=types.GenerateContentConfig(
+                      system_instruction=(
+                          f"Answer for {selected_w_sub} using sources:"
+                          f" {w_sub_data['sources']}"
+                      )
+                  ),
+              )
+              for chunk in response_stream:
+                if chunk.text:
+                  yield chunk.text
+
+            res_text = st.write_stream(stream_w_chat)
+            w_sub_data["chat"].append({"role": "assistant", "content": res_text})
+            save_data(st.session_state.db)
 
       with w_t3:
         st.write("### Recorded Writing Structural & Grammar Pitfalls")
