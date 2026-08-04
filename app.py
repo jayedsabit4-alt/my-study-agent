@@ -14,6 +14,14 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
+# --- STANDARD GEMINI MODEL STRINGS ---
+CHAT_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash-lite",
+]
+NOTEBOOK_MODEL = "gemini-2.5-pro"  # Default model for source document analysis
+
 
 # --- DEFENSIVE DATA LOADING ---
 def load_data():
@@ -38,7 +46,6 @@ def load_data():
         "Academic Essay": {"sources": [], "chat": [], "mistakes": []}
     }
 
-  # Clean empty unprompted chats
   empty_chats = [
       k
       for k, v in data["chats"].items()
@@ -103,7 +110,7 @@ def generate_chat_title(client, model, user_prompt):
         model=model,
         contents=title_prompt,
     )
-    clean_title = res.text.strip().replace('"', '').replace("'", "")
+    clean_title = res.text.strip().replace('"', "").replace("'", "")
     return clean_title[:30] if clean_title else "New Study Chat"
   except Exception:
     return f"Chat {datetime.now().strftime('%b %d %H:%M')}"
@@ -129,18 +136,6 @@ with st.sidebar:
   else:
     st.info("👈 Enter your Gemini API Key or configure st.secrets.")
     st.stop()
-
-  # MODEL SELECTOR
-  st.subheader("🤖 Model Selection")
-  selected_model = st.selectbox(
-      "Select Model Architecture",
-      [
-          "gemini-2.5-flash",
-          "gemini-2.5-pro",
-          "gemini-2.0-flash-lite",
-      ],
-      index=0,
-  )
 
   st.divider()
 
@@ -174,7 +169,6 @@ with st.sidebar:
         st.session_state.active_chat = new_chat_name
         st.rerun()
 
-    # Chat Threads List with Rename & Delete Options
     for chat_name in list(st.session_state.db["chats"].keys()):
       col_btn, col_ren, col_del = st.columns([3, 1, 1])
 
@@ -187,7 +181,6 @@ with st.sidebar:
         st.session_state.active_chat = chat_name
         st.rerun()
 
-      # Manual Rename Option
       with col_ren.popover("✏️"):
         new_title_in = st.text_input(
             "Rename Chat", value=chat_name, key=f"rename_in_{chat_name}"
@@ -202,7 +195,6 @@ with st.sidebar:
             save_data(st.session_state.db)
             st.rerun()
 
-      # Delete Option
       if len(st.session_state.db["chats"]) > 1:
         if col_del.button("🗑️", key=f"del_chat_{chat_name}"):
           del st.session_state.db["chats"][chat_name]
@@ -216,13 +208,21 @@ with st.sidebar:
 # VIEW 1: GEMINI GENERAL CHAT
 # ==========================================
 if st.session_state.active_mode == "general_chat":
-  st.title(f"💬 {st.session_state.active_chat}")
+  col_head1, col_head2 = st.columns([3, 1])
+  col_head1.title(f"💬 {st.session_state.active_chat}")
+
+  # Model selector placed inside the general chat interface
+  selected_model = col_head2.selectbox(
+      "🤖 Select Chat Model",
+      CHAT_MODELS,
+      index=0,
+      key=f"model_select_{st.session_state.active_chat}",
+  )
 
   chat_history = st.session_state.db["chats"].get(
       st.session_state.active_chat, []
   )
 
-  # Display Messages with Edit & Copy
   for idx, msg in enumerate(chat_history):
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
@@ -236,7 +236,6 @@ if st.session_state.active_mode == "general_chat":
         with col_a2.popover("📋"):
           st.code(msg["content"], language=None)
 
-  # MESSAGE EDITING FORM
   if st.session_state.editing_idx is not None:
     edit_idx = st.session_state.editing_idx
     with st.form("edit_message_form"):
@@ -261,7 +260,6 @@ if st.session_state.active_mode == "general_chat":
         st.session_state.editing_idx = None
         st.rerun()
 
-  # ATTACHMENT SECTION RIGHT ABOVE INPUT BAR
   with st.expander("📎 Attach Documents/Images to Next Prompt", expanded=False):
     uploaded_files = st.file_uploader(
         "Supported: PDF, PNG, JPG, TXT, PPTX, XLSX, DOCX",
@@ -289,7 +287,6 @@ if st.session_state.active_mode == "general_chat":
   )
 
   if user_query:
-    # Auto-generate title if this is the first message in a default/generic chat
     if len(chat_history) == 0:
       auto_title = generate_chat_title(client, selected_model, user_query)
       old_chat_key = st.session_state.active_chat
@@ -323,7 +320,7 @@ if st.session_state.active_mode == "general_chat":
           st.error(f"Error uploading {file.name}: {str(fe)}")
 
     with st.chat_message("assistant"):
-      status_box = st.info("⏳ Thinking & Generating...")
+      status_box = st.info(f"⏳ Generating with {selected_model}...")
       response_placeholder = st.empty()
       full_response = ""
 
@@ -356,6 +353,7 @@ if st.session_state.active_mode == "general_chat":
 # ==========================================
 elif st.session_state.active_mode == "notebook_studio":
   st.title("📚 Notebook Workspaces")
+  st.caption(f"Powered by ground-truth model: `{NOTEBOOK_MODEL}`")
 
   workspace_type = st.radio(
       "Select Section Workspace",
@@ -475,7 +473,7 @@ elif st.session_state.active_mode == "notebook_studio":
                 " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
             )
             res = client.models.generate_content(
-                model=selected_model,
+                model=NOTEBOOK_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json"
@@ -541,7 +539,7 @@ elif st.session_state.active_mode == "notebook_studio":
 
             try:
               stream_res = client.models.generate_content_stream(
-                  model=selected_model,
+                  model=NOTEBOOK_MODEL,
                   contents=q_in,
                   config=types.GenerateContentConfig(
                       system_instruction=(
@@ -687,7 +685,7 @@ elif st.session_state.active_mode == "notebook_studio":
                 " {'score':'80%','weakness':'...','strategy':'...'}"
             )
             res = client.models.generate_content(
-                model=selected_model,
+                model=NOTEBOOK_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json"
@@ -722,7 +720,7 @@ elif st.session_state.active_mode == "notebook_studio":
 
             try:
               stream_res_w = client.models.generate_content_stream(
-                  model=selected_model,
+                  model=NOTEBOOK_MODEL,
                   contents=wq_in,
                   config=types.GenerateContentConfig(
                       system_instruction=(
