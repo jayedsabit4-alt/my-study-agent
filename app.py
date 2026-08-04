@@ -5,6 +5,7 @@ from datetime import datetime
 from docx import Document
 import google.genai as genai
 from google.genai import types
+from google.genai.errors import APIError, ClientError
 import streamlit as st
 
 st.set_page_config(
@@ -62,7 +63,11 @@ if "active_mode" not in st.session_state:
   st.session_state.active_mode = "general_chat"
 
 if "active_chat" not in st.session_state:
-  st.session_state.active_chat = "Default Chat"
+  st.session_state.active_chat = (
+      list(st.session_state.db["chats"].keys())[0]
+      if st.session_state.db["chats"]
+      else "Default Chat"
+  )
 
 if "editing_idx" not in st.session_state:
   st.session_state.editing_idx = None
@@ -85,6 +90,23 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   filename = f"{subject_name}_{section_type}_Revision.docx"
   doc.save(filename)
   return filename
+
+
+def generate_chat_title(client, model, user_prompt):
+  """Generates a concise 3-5 word topic title based on first user prompt."""
+  try:
+    title_prompt = (
+        "Summarize the following prompt into a brief, descriptive 3 to 5 word chat title. "
+        "Do not use quotes or punctuation.\n\nPrompt: " + user_prompt
+    )
+    res = client.models.generate_content(
+        model=model,
+        contents=title_prompt,
+    )
+    clean_title = res.text.strip().replace('"', '').replace("'", "")
+    return clean_title[:30] if clean_title else "New Study Chat"
+  except Exception:
+    return f"Chat {datetime.now().strftime('%b %d %H:%M')}"
 
 
 # --- SIDEBAR: CONFIGURATION & NAVIGATION ---
@@ -146,20 +168,41 @@ with st.sidebar:
           len(current_chat_content) > 0
           or len(st.session_state.db["chats"]) == 0
       ):
-        new_chat_name = f"Chat {datetime.now().strftime('%b %d %H:%M')}"
+        new_chat_name = f"New Chat {datetime.now().strftime('%H:%M')}"
         st.session_state.db["chats"][new_chat_name] = []
         save_data(st.session_state.db)
         st.session_state.active_chat = new_chat_name
         st.rerun()
 
+    # Chat Threads List with Rename & Delete Options
     for chat_name in list(st.session_state.db["chats"].keys()):
-      col_btn, col_del = st.columns([4, 1])
-      if col_btn.button(
-          f"🗨️ {chat_name[:12]}", key=f"chat_select_{chat_name}"
-      ):
+      col_btn, col_ren, col_del = st.columns([3, 1, 1])
+
+      label = (
+          f"👉 {chat_name[:10]}.."
+          if chat_name == st.session_state.active_chat
+          else f"💬 {chat_name[:10]}.."
+      )
+      if col_btn.button(label, key=f"chat_select_{chat_name}"):
         st.session_state.active_chat = chat_name
         st.rerun()
 
+      # Manual Rename Option
+      with col_ren.popover("✏️"):
+        new_title_in = st.text_input(
+            "Rename Chat", value=chat_name, key=f"rename_in_{chat_name}"
+        )
+        if st.button("Save", key=f"save_rename_{chat_name}"):
+          if new_title_in and new_title_in != chat_name:
+            st.session_state.db["chats"][new_title_in] = (
+                st.session_state.db["chats"].pop(chat_name)
+            )
+            if st.session_state.active_chat == chat_name:
+              st.session_state.active_chat = new_title_in
+            save_data(st.session_state.db)
+            st.rerun()
+
+      # Delete Option
       if len(st.session_state.db["chats"]) > 1:
         if col_del.button("🗑️", key=f"del_chat_{chat_name}"):
           del st.session_state.db["chats"][chat_name]
@@ -170,7 +213,7 @@ with st.sidebar:
           st.rerun()
 
 # ==========================================
-# VIEW 1: GEMINI GENERAL CHAT (REAL-TIME STREAMING & EDITING)
+# VIEW 1: GEMINI GENERAL CHAT
 # ==========================================
 if st.session_state.active_mode == "general_chat":
   st.title(f"💬 {st.session_state.active_chat}")
@@ -190,11 +233,10 @@ if st.session_state.active_mode == "general_chat":
           st.session_state.editing_idx = idx
           st.rerun()
       else:
-        # Copy button using raw code block container
         with col_a2.popover("📋"):
           st.code(msg["content"], language=None)
 
-  # MESSAGE EDITING FORM IF TRIGGERED
+  # MESSAGE EDITING FORM
   if st.session_state.editing_idx is not None:
     edit_idx = st.session_state.editing_idx
     with st.form("edit_message_form"):
@@ -207,7 +249,6 @@ if st.session_state.active_mode == "general_chat":
       cancel_edit = col_e2.form_submit_button("Cancel")
 
       if submit_edit:
-        # Truncate history to edited message location
         chat_history = chat_history[:edit_idx]
         chat_history.append({"role": "user", "content": edited_text})
         st.session_state.db["chats"][st.session_state.active_chat] = (
@@ -243,12 +284,21 @@ if st.session_state.active_mode == "general_chat":
 
   user_query = st.chat_input("Ask anything...")
 
-  # Handle execution for new query or newly edited prompt waiting for generation
   should_generate = user_query or (
       len(chat_history) > 0 and chat_history[-1]["role"] == "user"
   )
 
   if user_query:
+    # Auto-generate title if this is the first message in a default/generic chat
+    if len(chat_history) == 0:
+      auto_title = generate_chat_title(client, selected_model, user_query)
+      old_chat_key = st.session_state.active_chat
+      st.session_state.db["chats"][auto_title] = st.session_state.db[
+          "chats"
+      ].pop(old_chat_key, [])
+      st.session_state.active_chat = auto_title
+      chat_history = st.session_state.db["chats"][auto_title]
+
     chat_history.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
       st.markdown(user_query)
@@ -266,32 +316,40 @@ if st.session_state.active_mode == "general_chat":
 
     if uploaded_files:
       for file in uploaded_files:
-        uploaded_part = client.files.upload(file=file)
-        contents.append(uploaded_part)
+        try:
+          uploaded_part = client.files.upload(file=file)
+          contents.append(uploaded_part)
+        except Exception as fe:
+          st.error(f"Error uploading {file.name}: {str(fe)}")
 
     with st.chat_message("assistant"):
       status_box = st.info("⏳ Thinking & Generating...")
       response_placeholder = st.empty()
       full_response = ""
 
-      # Direct Instant Chunk-by-Chunk Stream
-      stream_response = client.models.generate_content_stream(
-          model=selected_model,
-          contents=contents,
-          config=types.GenerateContentConfig(system_instruction=sys_inst),
-      )
+      try:
+        stream_response = client.models.generate_content_stream(
+            model=selected_model,
+            contents=contents,
+            config=types.GenerateContentConfig(system_instruction=sys_inst),
+        )
 
-      for chunk in stream_response:
-        if chunk.text:
-          full_response += chunk.text
-          response_placeholder.markdown(full_response + " ▌")
+        for chunk in stream_response:
+          if chunk.text:
+            full_response += chunk.text
+            response_placeholder.markdown(full_response + " ▌")
 
-      response_placeholder.markdown(full_response)
-      status_box.empty()
+        response_placeholder.markdown(full_response)
+        status_box.empty()
 
-      chat_history.append({"role": "assistant", "content": full_response})
-      st.session_state.db["chats"][st.session_state.active_chat] = chat_history
-      save_data(st.session_state.db)
+        chat_history.append({"role": "assistant", "content": full_response})
+        st.session_state.db["chats"][st.session_state.active_chat] = (
+            chat_history
+        )
+        save_data(st.session_state.db)
+      except (ClientError, APIError) as e:
+        status_box.empty()
+        st.error(f"Gemini API Error: {str(e)}")
 
 # ==========================================
 # VIEW 2: NOTEBOOK WORKSPACES
@@ -408,22 +466,26 @@ elif st.session_state.active_mode == "notebook_studio":
         )
 
         if st.button("Generate Practice Quiz"):
-          prompt = (
-              f"Generate {num_q} MCQs for subject '{selected_mcq_sub}'."
-              f" Difficulty: {diff}. Instructions: {mcq_custom_inst}. Context"
-              f" sources: {sub_data['sources']}. Return strictly JSON format:"
-              " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
-          )
-          res = client.models.generate_content(
-              model=selected_model,
-              contents=prompt,
-              config=types.GenerateContentConfig(
-                  response_mime_type="application/json"
-              ),
-          )
-          st.session_state.quiz = json.loads(res.text)
-          st.session_state.quiz_start = time.time()
-          st.session_state.quiz_duration = timer_m * 60
+          try:
+            prompt = (
+                f"Generate {num_q} MCQs for subject '{selected_mcq_sub}'."
+                f" Difficulty: {diff}. Instructions: {mcq_custom_inst}."
+                f" Context sources: {sub_data['sources']}. Return strictly JSON"
+                " format:"
+                " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
+            )
+            res = client.models.generate_content(
+                model=selected_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
+            )
+            st.session_state.quiz = json.loads(res.text)
+            st.session_state.quiz_start = time.time()
+            st.session_state.quiz_duration = timer_m * 60
+          except Exception as qe:
+            st.error(f"Quiz Generation Error: {str(qe)}")
 
         if "quiz" in st.session_state:
           elapsed = time.time() - st.session_state.quiz_start
@@ -477,25 +539,31 @@ elif st.session_state.active_mode == "notebook_studio":
             res_holder = st.empty()
             full_txt = ""
 
-            stream_res = client.models.generate_content_stream(
-                model=selected_model,
-                contents=q_in,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        f"Answer for {selected_mcq_sub} based on sources:"
-                        f" {sub_data['sources']}"
-                    )
-                ),
-            )
-            for chunk in stream_res:
-              if chunk.text:
-                full_txt += chunk.text
-                res_holder.markdown(full_txt + " ▌")
+            try:
+              stream_res = client.models.generate_content_stream(
+                  model=selected_model,
+                  contents=q_in,
+                  config=types.GenerateContentConfig(
+                      system_instruction=(
+                          f"Answer for {selected_mcq_sub} based on sources:"
+                          f" {sub_data['sources']}"
+                      )
+                  ),
+              )
+              for chunk in stream_res:
+                if chunk.text:
+                  full_txt += chunk.text
+                  res_holder.markdown(full_txt + " ▌")
 
-            res_holder.markdown(full_txt)
-            st_box.empty()
-            sub_data["chat"].append({"role": "assistant", "content": full_txt})
-            save_data(st.session_state.db)
+              res_holder.markdown(full_txt)
+              st_box.empty()
+              sub_data["chat"].append(
+                  {"role": "assistant", "content": full_txt}
+              )
+              save_data(st.session_state.db)
+            except Exception as ce:
+              st_box.empty()
+              st.error(f"Error: {str(ce)}")
 
       with m_tab3:
         st.write("### Recorded Mistake Entries")
@@ -611,28 +679,31 @@ elif st.session_state.active_mode == "notebook_studio":
 
         essay = st.text_area("Your Essay Input", height=150)
         if st.button("Evaluate Essay") and essay:
-          prompt = (
-              f"Evaluate essay for '{selected_w_sub}'. Benchmark:"
-              f" {target_benchmark}. Guidelines: {written_custom_inst}. Essay:"
-              f" {essay}. Output JSON:"
-              " {'score':'80%','weakness':'...','strategy':'...'}"
-          )
-          res = client.models.generate_content(
-              model=selected_model,
-              contents=prompt,
-              config=types.GenerateContentConfig(
-                  response_mime_type="application/json"
-              ),
-          )
-          eval_data = json.loads(res.text)
-          st.metric("Style Match / Evaluation Score", eval_data["score"])
-          w_sub_data["mistakes"].append({
-              "date": datetime.now().strftime("%Y-%m-%d"),
-              "area": eval_data["weakness"],
-              "correction": eval_data["strategy"],
-          })
-          save_data(st.session_state.db)
-          st.success("Writing feedback saved to log!")
+          try:
+            prompt = (
+                f"Evaluate essay for '{selected_w_sub}'. Benchmark:"
+                f" {target_benchmark}. Guidelines: {written_custom_inst}."
+                f" Essay: {essay}. Output JSON:"
+                " {'score':'80%','weakness':'...','strategy':'...'}"
+            )
+            res = client.models.generate_content(
+                model=selected_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
+            )
+            eval_data = json.loads(res.text)
+            st.metric("Style Match / Evaluation Score", eval_data["score"])
+            w_sub_data["mistakes"].append({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "area": eval_data["weakness"],
+                "correction": eval_data["strategy"],
+            })
+            save_data(st.session_state.db)
+            st.success("Writing feedback saved to log!")
+          except Exception as we:
+            st.error(f"Evaluation Error: {str(we)}")
 
       with w_t2:
         for chat in w_sub_data.get("chat", []):
@@ -649,27 +720,31 @@ elif st.session_state.active_mode == "notebook_studio":
             res_holder_w = st.empty()
             full_txt_w = ""
 
-            stream_res_w = client.models.generate_content_stream(
-                model=selected_model,
-                contents=wq_in,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        f"Answer for {selected_w_sub} using sources:"
-                        f" {w_sub_data['sources']}"
-                    )
-                ),
-            )
-            for chunk in stream_res_w:
-              if chunk.text:
-                full_txt_w += chunk.text
-                res_holder_w.markdown(full_txt_w + " ▌")
+            try:
+              stream_res_w = client.models.generate_content_stream(
+                  model=selected_model,
+                  contents=wq_in,
+                  config=types.GenerateContentConfig(
+                      system_instruction=(
+                          f"Answer for {selected_w_sub} using sources:"
+                          f" {w_sub_data['sources']}"
+                      )
+                  ),
+              )
+              for chunk in stream_res_w:
+                if chunk.text:
+                  full_txt_w += chunk.text
+                  res_holder_w.markdown(full_txt_w + " ▌")
 
-            res_holder_w.markdown(full_txt_w)
-            st_box_w.empty()
-            w_sub_data["chat"].append(
-                {"role": "assistant", "content": full_txt_w}
-            )
-            save_data(st.session_state.db)
+              res_holder_w.markdown(full_txt_w)
+              st_box_w.empty()
+              w_sub_data["chat"].append(
+                  {"role": "assistant", "content": full_txt_w}
+              )
+              save_data(st.session_state.db)
+            except Exception as we:
+              st_box_w.empty()
+              st.error(f"Error: {str(we)}")
 
       with w_t3:
         st.write("### Recorded Writing Structural & Grammar Pitfalls")
