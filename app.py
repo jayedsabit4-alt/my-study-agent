@@ -37,7 +37,7 @@ def load_data():
         "Academic Essay": {"sources": [], "chat": [], "mistakes": []}
     }
 
-  # Clean up empty/unprompted unused chats automatically
+  # Clean up empty unprompted chat threads
   empty_chats = [
       k
       for k, v in data["chats"].items()
@@ -54,7 +54,7 @@ def save_data(data):
     json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# --- INITIALIZE STATE ---
+# --- INITIALIZE SESSION STATE ---
 if "db" not in st.session_state:
   st.session_state.db = load_data()
 
@@ -84,16 +84,27 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-# --- SIDEBAR: NAVIGATION & CHAT THREAD MANAGEMENT ---
+# --- SIDEBAR: GEMINI API KEY & NAVIGATION ---
 with st.sidebar:
   st.title("🎓 Gemini + Notebook Studio")
 
-  api_key = st.text_input("Gemini API Key", type="password")
-  if not api_key:
-    st.info("👈 Enter your Gemini API Key to activate features.")
-    st.stop()
+  # Default API key from secrets if available, editable by user
+  default_key = st.secrets.get(
+      "GEMINI_API_KEY", st.session_state.get("saved_api_key", "")
+  )
+  api_key = st.text_input(
+      "Gemini API Key",
+      value=default_key,
+      type="password",
+      help="Set GEMINI_API_KEY in Streamlit Secrets to save permanently.",
+  )
 
-  client = genai.Client(api_key=api_key)
+  if api_key:
+    st.session_state.saved_api_key = api_key
+    client = genai.Client(api_key=api_key)
+  else:
+    st.info("👈 Enter your Gemini API Key or configure st.secrets.")
+    st.stop()
 
   st.divider()
 
@@ -113,19 +124,20 @@ with st.sidebar:
     col_c1, col_c2 = st.columns([3, 1])
     col_c1.subheader("💬 Chat Threads")
 
-    # Only create a new chat if previous active chat is non-empty
     if col_c2.button("➕", key="new_chat"):
       current_chat_content = st.session_state.db["chats"].get(
           st.session_state.active_chat, []
       )
-      if len(current_chat_content) > 0 or len(st.session_state.db["chats"]) == 0:
+      if (
+          len(current_chat_content) > 0
+          or len(st.session_state.db["chats"]) == 0
+      ):
         new_chat_name = f"Chat {datetime.now().strftime('%b %d %H:%M')}"
         st.session_state.db["chats"][new_chat_name] = []
         save_data(st.session_state.db)
         st.session_state.active_chat = new_chat_name
         st.rerun()
 
-    # List Chat Threads with Delete Buttons
     for chat_name in list(st.session_state.db["chats"].keys()):
       col_btn, col_del = st.columns([4, 1])
       if col_btn.button(
@@ -157,8 +169,20 @@ if st.session_state.active_mode == "general_chat":
       st.markdown(msg["content"])
 
   uploaded_files = st.file_uploader(
-      "Attach Files / Images to General Chat",
-      type=["png", "jpg", "jpeg", "pdf", "txt"],
+      "Attach Files / Documents to General Chat",
+      type=[
+          "png",
+          "jpg",
+          "jpeg",
+          "pdf",
+          "txt",
+          "ppt",
+          "pptx",
+          "xls",
+          "xlsx",
+          "doc",
+          "docx",
+      ],
       accept_multiple_files=True,
       key=f"gen_upload_{st.session_state.active_chat}",
   )
@@ -227,7 +251,6 @@ elif st.session_state.active_mode == "notebook_studio":
         st.success(f"Added {new_mcq_sub}")
         st.rerun()
 
-    # Subject Delete Option
     if selected_mcq_sub and selected_mcq_sub != "None":
       if col_s3.button(
           "🗑️ Delete Subject", key=f"del_sub_mcq_{selected_mcq_sub}"
@@ -244,7 +267,20 @@ elif st.session_state.active_mode == "notebook_studio":
           "📁 Import / Manage Subject Source Documents", expanded=False
       ):
         files = st.file_uploader(
-            "Upload files for this subject",
+            "Upload files for this subject (PDF, Image, PPT, Excel, Word, TXT)",
+            type=[
+                "pdf",
+                "png",
+                "jpg",
+                "jpeg",
+                "txt",
+                "ppt",
+                "pptx",
+                "xls",
+                "xlsx",
+                "doc",
+                "docx",
+            ],
             accept_multiple_files=True,
             key=f"mcq_files_{selected_mcq_sub}",
         )
@@ -256,7 +292,20 @@ elif st.session_state.active_mode == "notebook_studio":
             save_data(st.session_state.db)
             st.success("Sources updated!")
             st.rerun()
-        st.write("**Current Sources:**", sub_data["sources"])
+
+        st.write("**Current Source Documents:**")
+        if not sub_data["sources"]:
+          st.caption("No sources attached to this subject yet.")
+        else:
+          for idx, src_file in enumerate(sub_data["sources"]):
+            c_f1, c_f2 = st.columns([4, 1])
+            c_f1.write(f"📄 {src_file}")
+            if c_f2.button(
+                "🗑️ Remove", key=f"remove_mcq_src_{selected_mcq_sub}_{idx}"
+            ):
+              sub_data["sources"].pop(idx)
+              save_data(st.session_state.db)
+              st.rerun()
 
       m_tab1, m_tab2, m_tab3 = st.tabs([
           "🎯 Exam Generator",
@@ -286,9 +335,8 @@ elif st.session_state.active_mode == "notebook_studio":
         if st.button("Generate Practice Quiz"):
           prompt = (
               f"Generate {num_q} MCQs for subject '{selected_mcq_sub}'."
-              f" Difficulty: {diff}. Specific Instructions:"
-              f" {mcq_custom_inst}. Context: {sub_data['sources']}. Return"
-              " strictly JSON format:"
+              f" Difficulty: {diff}. Instructions: {mcq_custom_inst}. Context"
+              f" sources: {sub_data['sources']}. Return strictly JSON format:"
               " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
           )
           res = client.models.generate_content(
@@ -403,7 +451,6 @@ elif st.session_state.active_mode == "notebook_studio":
         st.success(f"Added {new_w_sub}")
         st.rerun()
 
-    # Subject Delete Option
     if selected_w_sub and selected_w_sub != "None":
       if col_w3.button("🗑️ Delete Subject", key=f"del_sub_w_{selected_w_sub}"):
         del st.session_state.db["written_subjects"][selected_w_sub]
@@ -418,7 +465,20 @@ elif st.session_state.active_mode == "notebook_studio":
           "📁 Import / Manage Subject Source Documents", expanded=False
       ):
         w_files = st.file_uploader(
-            "Upload files for this subject",
+            "Upload files for this subject (PDF, Image, PPT, Excel, Word, TXT)",
+            type=[
+                "pdf",
+                "png",
+                "jpg",
+                "jpeg",
+                "txt",
+                "ppt",
+                "pptx",
+                "xls",
+                "xlsx",
+                "doc",
+                "docx",
+            ],
             accept_multiple_files=True,
             key=f"w_files_{selected_w_sub}",
         )
@@ -430,7 +490,20 @@ elif st.session_state.active_mode == "notebook_studio":
             save_data(st.session_state.db)
             st.success("Sources updated!")
             st.rerun()
-        st.write("**Current Sources:**", w_sub_data["sources"])
+
+        st.write("**Current Source Documents:**")
+        if not w_sub_data["sources"]:
+          st.caption("No sources attached to this subject yet.")
+        else:
+          for idx, src_file in enumerate(w_sub_data["sources"]):
+            c_f1, c_f2 = st.columns([4, 1])
+            c_f1.write(f"📄 {src_file}")
+            if c_f2.button(
+                "🗑️ Remove", key=f"remove_w_src_{selected_w_sub}_{idx}"
+            ):
+              w_sub_data["sources"].pop(idx)
+              save_data(st.session_state.db)
+              st.rerun()
 
       w_t1, w_t2, w_t3 = st.tabs([
           "✍️ Evaluator & Benchmark",
@@ -454,8 +527,8 @@ elif st.session_state.active_mode == "notebook_studio":
         if st.button("Evaluate Essay") and essay:
           prompt = (
               f"Evaluate essay for '{selected_w_sub}'. Benchmark:"
-              f" {target_benchmark}. Custom Guidelines: {written_custom_inst}."
-              f" Essay: {essay}. Output JSON:"
+              f" {target_benchmark}. Guidelines: {written_custom_inst}. Essay:"
+              f" {essay}. Output JSON:"
               " {'score':'80%','weakness':'...','strategy':'...'}"
           )
           res = client.models.generate_content(
