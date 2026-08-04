@@ -14,7 +14,7 @@ st.set_page_config(
 DATA_FILE = "study_data.json"
 
 
-# --- DEFENSIVE DATA LOADING (PREVENTS KEYERROR ON EXISTING FILES) ---
+# --- DEFENSIVE DATA LOADING ---
 def load_data():
   data = {}
   if os.path.exists(DATA_FILE):
@@ -24,7 +24,6 @@ def load_data():
     except Exception:
       data = {}
 
-  # Ensure required top-level keys exist
   if "chats" not in data or not isinstance(data["chats"], dict):
     data["chats"] = {"Default Chat": []}
   if "mcq_subjects" not in data or not isinstance(data["mcq_subjects"], dict):
@@ -86,9 +85,6 @@ with st.sidebar:
     st.stop()
 
   client = genai.Client(api_key=api_key)
-  language = st.selectbox(
-      "Preferred Output Language / ভাষা", ["English", "Bengali (বাংলা)"]
-  )
 
   st.divider()
 
@@ -125,6 +121,12 @@ with st.sidebar:
 if st.session_state.active_mode == "general_chat":
   st.title(f"💬 {st.session_state.active_chat}")
 
+  gen_lang = st.selectbox(
+      "Chat Output Language / ভাষা",
+      ["English", "Bengali (বাংলা)"],
+      key="gen_lang_select",
+  )
+
   chat_history = st.session_state.db["chats"].get(
       st.session_state.active_chat, []
   )
@@ -146,7 +148,7 @@ if st.session_state.active_mode == "general_chat":
       st.markdown(user_query)
 
     sys_inst = (
-        f"You are a general study assistant. Respond in {language}. Use LaTeX"
+        f"You are a general study assistant. Respond in {gen_lang}. Use LaTeX"
         " ($ or $$) for math formulas."
     )
     contents = [user_query]
@@ -188,7 +190,7 @@ elif st.session_state.active_mode == "notebook_studio":
     col_s1, col_s2 = st.columns([3, 1])
     mcq_subs = list(st.session_state.db["mcq_subjects"].keys())
     selected_mcq_sub = col_s1.selectbox(
-        "Select Subject", mcq_subs if mcq_subs else ["None"]
+        "Select MCQ Subject", mcq_subs if mcq_subs else ["None"]
     )
 
     new_mcq_sub = col_s2.text_input("Create New MCQ Subject")
@@ -205,6 +207,13 @@ elif st.session_state.active_mode == "notebook_studio":
 
     if selected_mcq_sub and selected_mcq_sub != "None":
       sub_data = st.session_state.db["mcq_subjects"][selected_mcq_sub]
+
+      # Subject Language Selection
+      mcq_lang = st.selectbox(
+          f"Output Language for Subject '{selected_mcq_sub}'",
+          ["English", "Bengali (বাংলা)"],
+          key=f"mcq_lang_{selected_mcq_sub}",
+      )
 
       with st.expander(
           "📁 Import / Manage Subject Source Documents", expanded=False
@@ -239,13 +248,23 @@ elif st.session_state.active_mode == "notebook_studio":
           )
         with c2:
           timer_m = st.number_input("Practice Timer (Minutes)", 1, 120, 10)
-          custom_inst = st.text_area("Custom Prompt / Focus Chapter", "")
+
+        # Custom Instructions / Prompt Guidance
+        mcq_custom_inst = st.text_area(
+            "📌 Custom Evaluation & Question Generation Instructions",
+            placeholder=(
+                "e.g., Focus on Chapter 3 formulas, clinical scenarios,"
+                " negative marking rules..."
+            ),
+            key=f"inst_mcq_{selected_mcq_sub}",
+        )
 
         if st.button("Generate Practice Quiz"):
           prompt = (
-              f"Generate {num_q} MCQs for '{selected_mcq_sub}'. Difficulty:"
-              f" {diff}. Instructions: {custom_inst}. Language: {language}."
-              " Return strictly JSON format:"
+              f"Generate {num_q} MCQs for subject '{selected_mcq_sub}'."
+              f" Difficulty: {diff}. Specific Instructions:"
+              f" {mcq_custom_inst}. Language: {mcq_lang}. Sources context:"
+              f" {sub_data['sources']}. Return strictly JSON format:"
               " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
           )
           res = client.models.generate_content(
@@ -308,7 +327,7 @@ elif st.session_state.active_mode == "notebook_studio":
               contents=q_in,
               config=types.GenerateContentConfig(
                   system_instruction=(
-                      f"Answer for {selected_mcq_sub} in {language} based on"
+                      f"Answer for {selected_mcq_sub} in {mcq_lang} based on"
                       f" sources: {sub_data['sources']}"
                   )
               ),
@@ -345,7 +364,7 @@ elif st.session_state.active_mode == "notebook_studio":
     col_w1, col_w2 = st.columns([3, 1])
     w_subs = list(st.session_state.db["written_subjects"].keys())
     selected_w_sub = col_w1.selectbox(
-        "Select Subject", w_subs if w_subs else ["None"]
+        "Select Written Subject", w_subs if w_subs else ["None"]
     )
 
     new_w_sub = col_w2.text_input("Create New Written Subject")
@@ -362,6 +381,13 @@ elif st.session_state.active_mode == "notebook_studio":
 
     if selected_w_sub and selected_w_sub != "None":
       w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
+
+      # Subject Language Selection
+      w_lang = st.selectbox(
+          f"Output Language for Subject '{selected_w_sub}'",
+          ["English", "Bengali (বাংলা)"],
+          key=f"w_lang_{selected_w_sub}",
+      )
 
       with st.expander(
           "📁 Import / Manage Subject Source Documents", expanded=False
@@ -389,11 +415,23 @@ elif st.session_state.active_mode == "notebook_studio":
 
       with w_t1:
         target_benchmark = st.text_area("Benchmark Writing Sample")
+
+        # Custom Instructions for Essay Evaluation
+        written_custom_inst = st.text_area(
+            "📌 Custom Evaluation Guidelines / Rubrics",
+            placeholder=(
+                "e.g., Grade strictly according to university standard,"
+                " highlight grammatical passives, check for thesis clarity..."
+            ),
+            key=f"inst_w_{selected_w_sub}",
+        )
+
         essay = st.text_area("Your Essay Input", height=150)
         if st.button("Evaluate Essay") and essay:
           prompt = (
               f"Evaluate essay for '{selected_w_sub}'. Benchmark:"
-              f" {target_benchmark}. Essay: {essay}. Output JSON:"
+              f" {target_benchmark}. Custom Guidelines: {written_custom_inst}."
+              f" Essay: {essay}. Language: {w_lang}. Output JSON:"
               " {'score':'80%','weakness':'...','strategy':'...'}"
           )
           res = client.models.generate_content(
@@ -404,7 +442,7 @@ elif st.session_state.active_mode == "notebook_studio":
               ),
           )
           eval_data = json.loads(res.text)
-          st.metric("Style Match", eval_data["score"])
+          st.metric("Style Match / Evaluation Score", eval_data["score"])
           w_sub_data["mistakes"].append({
               "date": datetime.now().strftime("%Y-%m-%d"),
               "area": eval_data["weakness"],
@@ -425,7 +463,7 @@ elif st.session_state.active_mode == "notebook_studio":
               contents=wq_in,
               config=types.GenerateContentConfig(
                   system_instruction=(
-                      f"Answer for {selected_w_sub} in {language} using"
+                      f"Answer for {selected_w_sub} in {w_lang} using"
                       f" sources: {w_sub_data['sources']}"
                   )
               ),
