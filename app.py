@@ -15,13 +15,14 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
-# --- STANDARD GEMINI MODEL STRINGS ---
+# --- VALID & OFFICIAL GEMINI MODEL ENDPOINTS ---
 CHAT_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-pro",
+    "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
 ]
-NOTEBOOK_MODEL = "gemini-2.5-pro"
+NOTEBOOK_MODEL = "gemini-1.5-pro"
 
 
 # --- DEFENSIVE DATA LOADING ---
@@ -101,7 +102,7 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
 
 
 def generate_offline_title(user_prompt):
-  """Offline title generation to prevent 429 Rate Limit consumption."""
+  """Offline title generator to avoid unnecessary API quota consumption."""
   clean_text = (
       user_prompt.strip()
       .replace("\n", " ")
@@ -222,6 +223,7 @@ if st.session_state.active_mode == "general_chat":
   col_head1, col_head2 = st.columns([3, 1])
   col_head1.title(f"💬 {st.session_state.active_chat}")
 
+  # Model selector controls future prompts for this chat session
   selected_model = col_head2.selectbox(
       "🤖 Select Chat Model",
       CHAT_MODELS,
@@ -233,6 +235,7 @@ if st.session_state.active_mode == "general_chat":
       st.session_state.active_chat, []
   )
 
+  # Render existing chat history statically
   for idx, msg in enumerate(chat_history):
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
@@ -330,7 +333,7 @@ if st.session_state.active_mode == "general_chat":
           st.error(f"Error uploading {file.name}: {str(fe)}")
 
     with st.chat_message("assistant"):
-      status_box = st.info(f"⏳ Generating with {selected_model}...")
+      status_box = st.info(f"⏳ Generating response using {selected_model}...")
       response_placeholder = st.empty()
       full_response = ""
 
@@ -358,12 +361,11 @@ if st.session_state.active_mode == "general_chat":
         status_box.empty()
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
           st.warning(
-              "⚠️ Rate limit reached on Free Tier. Pausing briefly before retrying..."
+              "⚠️ Rate limit reached on Free Tier. Waiting briefly before"
+              " retry..."
           )
           time.sleep(5)
-          st.experimental_rerun() if hasattr(
-              st, "experimental_rerun"
-          ) else st.rerun()
+          st.rerun()
         else:
           st.error(f"Gemini API Error: {str(e)}")
 
