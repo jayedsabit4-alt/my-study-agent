@@ -7,7 +7,12 @@ import google.genai as genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError
 import streamlit as st
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 st.set_page_config(
     page_title="Agentic Study Platform", page_icon="🎓", layout="wide"
@@ -15,14 +20,14 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
-# --- VALID & OFFICIAL GEMINI MODEL ENDPOINTS ---
+# --- CURRENT OFFICIAL GEMINI MODELS ---
 CHAT_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
 ]
-NOTEBOOK_MODEL = "gemini-1.5-pro"
+NOTEBOOK_MODEL = "gemini-2.5-pro"
+MAX_HISTORY_MESSAGES = 6  # Limit history to last 6 messages to conserve Tokens Per Minute (TPM)
 
 
 # --- DEFENSIVE DATA LOADING ---
@@ -102,7 +107,6 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
 
 
 def generate_offline_title(user_prompt):
-  """Offline title generator to avoid unnecessary API quota consumption."""
   clean_text = (
       user_prompt.strip()
       .replace("\n", " ")
@@ -223,7 +227,6 @@ if st.session_state.active_mode == "general_chat":
   col_head1, col_head2 = st.columns([3, 1])
   col_head1.title(f"💬 {st.session_state.active_chat}")
 
-  # Model selector controls future prompts for this chat session
   selected_model = col_head2.selectbox(
       "🤖 Select Chat Model",
       CHAT_MODELS,
@@ -235,7 +238,6 @@ if st.session_state.active_mode == "general_chat":
       st.session_state.active_chat, []
   )
 
-  # Render existing chat history statically
   for idx, msg in enumerate(chat_history):
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
@@ -295,10 +297,6 @@ if st.session_state.active_mode == "general_chat":
 
   user_query = st.chat_input("Ask anything...")
 
-  should_generate = user_query or (
-      len(chat_history) > 0 and chat_history[-1]["role"] == "user"
-  )
-
   if user_query:
     if len(chat_history) == 0:
       auto_title = generate_offline_title(user_query)
@@ -310,25 +308,27 @@ if st.session_state.active_mode == "general_chat":
       chat_history = st.session_state.db["chats"][auto_title]
 
     chat_history.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-      st.markdown(user_query)
+    st.session_state.db["chats"][st.session_state.active_chat] = chat_history
+    save_data(st.session_state.db)
+    st.rerun()
 
-  if should_generate and (
-      len(chat_history) > 0 and chat_history[-1]["role"] == "user"
-  ):
+  if len(chat_history) > 0 and chat_history[-1]["role"] == "user":
     sys_inst = (
         "You are a general study assistant. Respond in the user's preferred"
         " language. Use LaTeX ($ or $$) for math formulas."
     )
 
-    latest_prompt = chat_history[-1]["content"]
-    contents = [latest_prompt]
+    # --- TOKEN OPTIMIZATION: Send only recent history ---
+    recent_history = chat_history[-MAX_HISTORY_MESSAGES:]
+    formatted_contents = []
+    for m in recent_history:
+      formatted_contents.append(f"{m['role'].capitalize()}: {m['content']}")
 
     if uploaded_files:
       for file in uploaded_files:
         try:
           uploaded_part = client.files.upload(file=file)
-          contents.append(uploaded_part)
+          formatted_contents.append(uploaded_part)
         except Exception as fe:
           st.error(f"Error uploading {file.name}: {str(fe)}")
 
@@ -340,7 +340,7 @@ if st.session_state.active_mode == "general_chat":
       try:
         stream_response = client.models.generate_content_stream(
             model=selected_model,
-            contents=contents,
+            contents=formatted_contents,
             config=types.GenerateContentConfig(system_instruction=sys_inst),
         )
 
@@ -361,11 +361,9 @@ if st.session_state.active_mode == "general_chat":
         status_box.empty()
         if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
           st.warning(
-              "⚠️ Rate limit reached on Free Tier. Waiting briefly before"
-              " retry..."
+              "⚠️ Rate limit reached on Free Tier API. Please wait 30–60"
+              " seconds for the quota window to reset."
           )
-          time.sleep(5)
-          st.rerun()
         else:
           st.error(f"Gemini API Error: {str(e)}")
 
