@@ -37,7 +37,7 @@ def load_data():
         "Academic Essay": {"sources": [], "chat": [], "mistakes": []}
     }
 
-  # Clean up empty unprompted chat threads
+  # Clean empty unprompted chats
   empty_chats = [
       k
       for k, v in data["chats"].items()
@@ -64,6 +64,9 @@ if "active_mode" not in st.session_state:
 if "active_chat" not in st.session_state:
   st.session_state.active_chat = "Default Chat"
 
+if "editing_idx" not in st.session_state:
+  st.session_state.editing_idx = None
+
 
 def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   doc = Document()
@@ -84,7 +87,7 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-# --- SIDEBAR: GEMINI API KEY & NAVIGATION ---
+# --- SIDEBAR: CONFIGURATION & NAVIGATION ---
 with st.sidebar:
   st.title("🎓 Gemini + Notebook Studio")
 
@@ -95,7 +98,7 @@ with st.sidebar:
       "Gemini API Key",
       value=default_key,
       type="password",
-      help="Set GEMINI_API_KEY in Streamlit Secrets to save permanently.",
+      help="Set GEMINI_API_KEY in Streamlit Secrets for permanent access.",
   )
 
   if api_key:
@@ -104,6 +107,18 @@ with st.sidebar:
   else:
     st.info("👈 Enter your Gemini API Key or configure st.secrets.")
     st.stop()
+
+  # MODEL SELECTOR
+  st.subheader("🤖 Model Selection")
+  selected_model = st.selectbox(
+      "Select Model Architecture",
+      [
+          "gemini-2.5-flash",
+          "gemini-2.5-pro",
+          "gemini-2.0-flash-lite",
+      ],
+      index=0,
+  )
 
   st.divider()
 
@@ -121,7 +136,7 @@ with st.sidebar:
 
   if st.session_state.active_mode == "general_chat":
     col_c1, col_c2 = st.columns([3, 1])
-    col_c1.subheader("💬 Chat Threads")
+    col_c1.subheader("💬 Threads")
 
     if col_c2.button("➕", key="new_chat"):
       current_chat_content = st.session_state.db["chats"].get(
@@ -140,7 +155,7 @@ with st.sidebar:
     for chat_name in list(st.session_state.db["chats"].keys()):
       col_btn, col_del = st.columns([4, 1])
       if col_btn.button(
-          f"🗨️ {chat_name[:15]}", key=f"chat_select_{chat_name}"
+          f"🗨️ {chat_name[:12]}", key=f"chat_select_{chat_name}"
       ):
         st.session_state.active_chat = chat_name
         st.rerun()
@@ -155,7 +170,7 @@ with st.sidebar:
           st.rerun()
 
 # ==========================================
-# VIEW 1: GEMINI GENERAL CHAT (STREAMING ENABLED)
+# VIEW 1: GEMINI GENERAL CHAT (REAL-TIME STREAMING & EDITING)
 # ==========================================
 if st.session_state.active_mode == "general_chat":
   st.title(f"💬 {st.session_state.active_chat}")
@@ -163,40 +178,91 @@ if st.session_state.active_mode == "general_chat":
   chat_history = st.session_state.db["chats"].get(
       st.session_state.active_chat, []
   )
-  for msg in chat_history:
+
+  # Display Messages with Edit & Copy
+  for idx, msg in enumerate(chat_history):
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
 
-  uploaded_files = st.file_uploader(
-      "Attach Files / Documents to General Chat",
-      type=[
-          "png",
-          "jpg",
-          "jpeg",
-          "pdf",
-          "txt",
-          "ppt",
-          "pptx",
-          "xls",
-          "xlsx",
-          "doc",
-          "docx",
-      ],
-      accept_multiple_files=True,
-      key=f"gen_upload_{st.session_state.active_chat}",
-  )
+      col_a1, col_a2 = st.columns([10, 1])
+      if msg["role"] == "user":
+        if col_a2.button("✏️", key=f"edit_msg_{idx}"):
+          st.session_state.editing_idx = idx
+          st.rerun()
+      else:
+        # Copy button using raw code block container
+        with col_a2.popover("📋"):
+          st.code(msg["content"], language=None)
+
+  # MESSAGE EDITING FORM IF TRIGGERED
+  if st.session_state.editing_idx is not None:
+    edit_idx = st.session_state.editing_idx
+    with st.form("edit_message_form"):
+      st.write("✏️ **Edit Prompt:**")
+      edited_text = st.text_area(
+          "Update message", chat_history[edit_idx]["content"]
+      )
+      col_e1, col_e2 = st.columns(2)
+      submit_edit = col_e1.form_submit_button("Save & Resubmit")
+      cancel_edit = col_e2.form_submit_button("Cancel")
+
+      if submit_edit:
+        # Truncate history to edited message location
+        chat_history = chat_history[:edit_idx]
+        chat_history.append({"role": "user", "content": edited_text})
+        st.session_state.db["chats"][st.session_state.active_chat] = (
+            chat_history
+        )
+        st.session_state.editing_idx = None
+        save_data(st.session_state.db)
+        st.rerun()
+      if cancel_edit:
+        st.session_state.editing_idx = None
+        st.rerun()
+
+  # ATTACHMENT SECTION RIGHT ABOVE INPUT BAR
+  with st.expander("📎 Attach Documents/Images to Next Prompt", expanded=False):
+    uploaded_files = st.file_uploader(
+        "Supported: PDF, PNG, JPG, TXT, PPTX, XLSX, DOCX",
+        type=[
+            "png",
+            "jpg",
+            "jpeg",
+            "pdf",
+            "txt",
+            "ppt",
+            "pptx",
+            "xls",
+            "xlsx",
+            "doc",
+            "docx",
+        ],
+        accept_multiple_files=True,
+        key=f"gen_upload_{st.session_state.active_chat}",
+    )
 
   user_query = st.chat_input("Ask anything...")
+
+  # Handle execution for new query or newly edited prompt waiting for generation
+  should_generate = user_query or (
+      len(chat_history) > 0 and chat_history[-1]["role"] == "user"
+  )
+
   if user_query:
     chat_history.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
       st.markdown(user_query)
 
+  if should_generate and (
+      len(chat_history) > 0 and chat_history[-1]["role"] == "user"
+  ):
     sys_inst = (
         "You are a general study assistant. Respond in the user's preferred"
         " language. Use LaTeX ($ or $$) for math formulas."
     )
-    contents = [user_query]
+
+    latest_prompt = chat_history[-1]["content"]
+    contents = [latest_prompt]
 
     if uploaded_files:
       for file in uploaded_files:
@@ -204,19 +270,26 @@ if st.session_state.active_mode == "general_chat":
         contents.append(uploaded_part)
 
     with st.chat_message("assistant"):
+      status_box = st.info("⏳ Thinking & Generating...")
+      response_placeholder = st.empty()
+      full_response = ""
 
-      def stream_response():
-        response_stream = client.models.generate_content_stream(
-            model="gemini-3.5-flash",
-            contents=contents,
-            config=types.GenerateContentConfig(system_instruction=sys_inst),
-        )
-        for chunk in response_stream:
-          if chunk.text:
-            yield chunk.text
+      # Direct Instant Chunk-by-Chunk Stream
+      stream_response = client.models.generate_content_stream(
+          model=selected_model,
+          contents=contents,
+          config=types.GenerateContentConfig(system_instruction=sys_inst),
+      )
 
-      full_res = st.write_stream(stream_response)
-      chat_history.append({"role": "assistant", "content": full_res})
+      for chunk in stream_response:
+        if chunk.text:
+          full_response += chunk.text
+          response_placeholder.markdown(full_response + " ▌")
+
+      response_placeholder.markdown(full_response)
+      status_box.empty()
+
+      chat_history.append({"role": "assistant", "content": full_response})
       st.session_state.db["chats"][st.session_state.active_chat] = chat_history
       save_data(st.session_state.db)
 
@@ -272,7 +345,7 @@ elif st.session_state.active_mode == "notebook_studio":
           "📁 Import / Manage Subject Source Documents", expanded=False
       ):
         files = st.file_uploader(
-            "Upload files for this subject (PDF, Image, PPT, Excel, Word, TXT)",
+            "Upload files for this subject",
             type=[
                 "pdf",
                 "png",
@@ -330,10 +403,7 @@ elif st.session_state.active_mode == "notebook_studio":
 
         mcq_custom_inst = st.text_area(
             "📌 Custom Evaluation & Question Generation Instructions",
-            placeholder=(
-                "e.g., Focus on Chapter 3 formulas, clinical scenarios,"
-                " negative marking rules..."
-            ),
+            placeholder="Focus on specific formulas, chapters, or concepts...",
             key=f"inst_mcq_{selected_mcq_sub}",
         )
 
@@ -345,7 +415,7 @@ elif st.session_state.active_mode == "notebook_studio":
               " [{'id':1,'question':'...','options':['A)...','B)...'],'correct':'A)...','explanation':'...'}]"
           )
           res = client.models.generate_content(
-              model="gemini-3.5-flash",
+              model=selected_model,
               contents=prompt,
               config=types.GenerateContentConfig(
                   response_mime_type="application/json"
@@ -403,24 +473,28 @@ elif st.session_state.active_mode == "notebook_studio":
             st.markdown(q_in)
 
           with st.chat_message("assistant"):
+            st_box = st.info("⏳ Generating response...")
+            res_holder = st.empty()
+            full_txt = ""
 
-            def stream_mcq_chat():
-              response_stream = client.models.generate_content_stream(
-                  model="gemini-3.5-flash",
-                  contents=q_in,
-                  config=types.GenerateContentConfig(
-                      system_instruction=(
-                          f"Answer for {selected_mcq_sub} based on sources:"
-                          f" {sub_data['sources']}"
-                      )
-                  ),
-              )
-              for chunk in response_stream:
-                if chunk.text:
-                  yield chunk.text
+            stream_res = client.models.generate_content_stream(
+                model=selected_model,
+                contents=q_in,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        f"Answer for {selected_mcq_sub} based on sources:"
+                        f" {sub_data['sources']}"
+                    )
+                ),
+            )
+            for chunk in stream_res:
+              if chunk.text:
+                full_txt += chunk.text
+                res_holder.markdown(full_txt + " ▌")
 
-            res_text = st.write_stream(stream_mcq_chat)
-            sub_data["chat"].append({"role": "assistant", "content": res_text})
+            res_holder.markdown(full_txt)
+            st_box.empty()
+            sub_data["chat"].append({"role": "assistant", "content": full_txt})
             save_data(st.session_state.db)
 
       with m_tab3:
@@ -480,7 +554,7 @@ elif st.session_state.active_mode == "notebook_studio":
           "📁 Import / Manage Subject Source Documents", expanded=False
       ):
         w_files = st.file_uploader(
-            "Upload files for this subject (PDF, Image, PPT, Excel, Word, TXT)",
+            "Upload files for this subject",
             type=[
                 "pdf",
                 "png",
@@ -531,10 +605,7 @@ elif st.session_state.active_mode == "notebook_studio":
 
         written_custom_inst = st.text_area(
             "📌 Custom Evaluation Guidelines / Rubrics",
-            placeholder=(
-                "e.g., Grade strictly according to academic standard,"
-                " highlight passive voice, check thesis clarity..."
-            ),
+            placeholder="Grade strictly according to academic standards...",
             key=f"inst_w_{selected_w_sub}",
         )
 
@@ -547,7 +618,7 @@ elif st.session_state.active_mode == "notebook_studio":
               " {'score':'80%','weakness':'...','strategy':'...'}"
           )
           res = client.models.generate_content(
-              model="gemini-3.5-flash",
+              model=selected_model,
               contents=prompt,
               config=types.GenerateContentConfig(
                   response_mime_type="application/json"
@@ -574,24 +645,30 @@ elif st.session_state.active_mode == "notebook_studio":
             st.markdown(wq_in)
 
           with st.chat_message("assistant"):
+            st_box_w = st.info("⏳ Generating response...")
+            res_holder_w = st.empty()
+            full_txt_w = ""
 
-            def stream_w_chat():
-              response_stream = client.models.generate_content_stream(
-                  model="gemini-3.5-flash",
-                  contents=wq_in,
-                  config=types.GenerateContentConfig(
-                      system_instruction=(
-                          f"Answer for {selected_w_sub} using sources:"
-                          f" {w_sub_data['sources']}"
-                      )
-                  ),
-              )
-              for chunk in response_stream:
-                if chunk.text:
-                  yield chunk.text
+            stream_res_w = client.models.generate_content_stream(
+                model=selected_model,
+                contents=wq_in,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        f"Answer for {selected_w_sub} using sources:"
+                        f" {w_sub_data['sources']}"
+                    )
+                ),
+            )
+            for chunk in stream_res_w:
+              if chunk.text:
+                full_txt_w += chunk.text
+                res_holder_w.markdown(full_txt_w + " ▌")
 
-            res_text = st.write_stream(stream_w_chat)
-            w_sub_data["chat"].append({"role": "assistant", "content": res_text})
+            res_holder_w.markdown(full_txt_w)
+            st_box_w.empty()
+            w_sub_data["chat"].append(
+                {"role": "assistant", "content": full_txt_w}
+            )
             save_data(st.session_state.db)
 
       with w_t3:
