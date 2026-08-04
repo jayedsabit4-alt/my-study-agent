@@ -23,8 +23,9 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-if "db" not in st_state if hasattr(st, "session_state") else False: pass
+# --- INITIALIZE DATABASE IN SESSION STATE ---
 if "db" not in st.session_state:
+    st.session_state.db = load_data()
     st.session_state.db = load_data()
 
 # --- DOCX EXPORT GENERATOR ---
