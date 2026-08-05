@@ -47,12 +47,12 @@ def fix_latex_formatting(text: str) -> str:
     if not text:
         return ""
 
-    # 1. Force newline spacing around markdown headers and horizontal rules stuck in text
+    # 1. Force newline spacing around markdown headers and horizontal rules
     text = re.sub(r"(?<!\n)(###?\s+)", r"\n\n\1", text)
     text = re.sub(r"(?<!\n)(---\s*)", r"\n\n\1", text)
     text = re.sub(r"(\\end\{[a-zA-Z]+\})\s*(###?|---)", r"\1\n\n\2", text)
 
-    # 2. Convert raw bracket notations [ ... ] and \( ... \) to standard dollar signs
+    # 2. Convert bracket notations [ ... ] and \( ... \) to standard dollar signs
     text = re.sub(r"\\\[\s*(.*?)\s*\\\]", r"\n$$\1$$\n", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\w)\[\s*(\\.*?)\s*\]", r"\n$$\1$$\n", text, flags=re.DOTALL)
     text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text, flags=re.DOTALL)
@@ -160,7 +160,7 @@ if "active_chat" not in st.session_state:
 
 # --- FAST IMAGE COMPRESSION HELPER ---
 def compress_image_to_b64(image_bytes, max_dim=1000, quality=75):
-    """Resizes and compresses images to JPEG before base64 encoding to keep uploads under 200KB."""
+    """Resizes and compresses images to JPEG before base64 encoding."""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode in ("RGBA", "P"):
@@ -175,66 +175,60 @@ def compress_image_to_b64(image_bytes, max_dim=1000, quality=75):
         return f"data:image/jpeg;base64,{b64_str}"
 
 
-# --- MULTI-FILE OPTIMIZED PROCESSOR ---
-def process_uploaded_files(uploaded_files):
-    """Processes multiple files simultaneously with chunking and fast image compression."""
-    if not uploaded_files:
-        return "", []
-
+# --- SINGLE FILE EXTRACTOR ---
+def extract_file_data(uploaded_file):
+    """Extracts text and image payload from a single file object."""
+    file_type = uploaded_file.name.split(".")[-1].lower()
     extracted_text = ""
-    image_urls = []
+    image_url = None
 
-    for uploaded_file in uploaded_files:
-        file_type = uploaded_file.name.split(".")[-1].lower()
-        extracted_text += f"\n\n--- Attached File: {uploaded_file.name} ---\n"
+    try:
+        if file_type in ["png", "jpg", "jpeg"]:
+            image_url = compress_image_to_b64(uploaded_file.getvalue())
+            extracted_text = f"[Image Document: {uploaded_file.name}]"
 
-        try:
-            if file_type in ["png", "jpg", "jpeg"]:
-                if len(image_urls) < 3:
-                    compressed_url = compress_image_to_b64(uploaded_file.getvalue())
-                    image_urls.append(compressed_url)
-                extracted_text += f"[Image Attached: {uploaded_file.name}]"
+        elif file_type == "pdf":
+            from pypdf import PdfReader
 
-            elif file_type == "pdf":
-                from pypdf import PdfReader
+            reader = PdfReader(uploaded_file)
+            pdf_text = []
+            for page_idx, page in enumerate(reader.pages):
+                if page_idx >= 40:  # Safety threshold
+                    pdf_text.append("\n[Truncated remaining pages for performance]")
+                    break
+                txt = page.extract_text()
+                if txt:
+                    pdf_text.append(txt)
 
-                reader = PdfReader(uploaded_file)
-                pdf_text = []
-                # Fast extraction capped at max 40 pages per PDF to prevent thread lock
-                for page_idx, page in enumerate(reader.pages):
-                    if page_idx >= 40:
-                        pdf_text.append("\n[Truncated remaining pages for fast performance]")
-                        break
-                    txt = page.extract_text()
-                    if txt:
-                        pdf_text.append(txt)
+            extracted_text = "\n".join(pdf_text) if pdf_text else "[Scanned/Handwritten PDF Context]"
 
-                if pdf_text:
-                    extracted_text += "\n".join(pdf_text)
-                else:
-                    extracted_text += "[Scanned/Handwritten PDF Document Context]"
+        elif file_type == "docx":
+            from docx import Document
 
-            elif file_type == "docx":
-                from docx import Document
+            doc = Document(uploaded_file)
+            extracted_text = "\n".join([p.text for p in doc.paragraphs])
 
-                doc = Document(uploaded_file)
-                extracted_text += "\n".join([p.text for p in doc.paragraphs])
+        elif file_type in ["csv", "xlsx"]:
+            df = (
+                pd.read_csv(uploaded_file)
+                if file_type == "csv"
+                else pd.read_excel(uploaded_file)
+            )
+            extracted_text = df.head(100).to_string(index=False)
 
-            elif file_type in ["csv", "xlsx"]:
-                df = (
-                    pd.read_csv(uploaded_file)
-                    if file_type == "csv"
-                    else pd.read_excel(uploaded_file)
-                )
-                extracted_text += df.head(100).to_string(index=False)
+        else:
+            extracted_text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
 
-            else:
-                extracted_text += uploaded_file.getvalue().decode("utf-8", errors="ignore")
+    except Exception as e:
+        extracted_text = f"Error extracting {uploaded_file.name}: {str(e)}"
 
-        except Exception as e:
-            extracted_text += f"Error processing {uploaded_file.name}: {str(e)}"
-
-    return extracted_text, image_urls
+    return {
+        "name": uploaded_file.name,
+        "type": file_type,
+        "text": extracted_text,
+        "image_url": image_url,
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
 
 
 def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
@@ -379,11 +373,18 @@ if st.session_state.active_mode == "general_chat":
             st.error("Please enter an OpenRouter API key in the sidebar first!")
         else:
             client = get_openrouter_client(st.session_state.saved_openrouter_key)
-            file_text, image_urls = (
-                process_uploaded_files(attached_files) if attached_files else ("", [])
-            )
+            
+            temp_file_text = ""
+            image_urls = []
+            if attached_files:
+                for f in attached_files:
+                    f_data = extract_file_data(f)
+                    temp_file_text += f"\n\n--- Attached File: {f_data['name']} ---\n{f_data['text']}"
+                    if f_data.get("image_url"):
+                        image_urls.append(f_data["image_url"])
+
             full_prompt = (
-                f"{user_query}\n{file_text}" if file_text else user_query
+                f"{user_query}\n{temp_file_text}" if temp_file_text else user_query
             )
 
             chat_history.append({"role": "user", "content": full_prompt})
@@ -491,11 +492,11 @@ elif st.session_state.active_mode == "notebook_studio":
         col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
         mcq_subs = list(st.session_state.db["mcq_subjects"].keys())
         selected_mcq_sub = col_s1.selectbox(
-            "Select Subject", mcq_subs if mcq_subs else ["None"]
+            "Select Subject / Notebook", mcq_subs if mcq_subs else ["None"]
         )
 
-        new_mcq_sub = col_s2.text_input("New MCQ Subject")
-        if col_s2.button("Add Subject", key="btn_add_mcq_sub") and new_mcq_sub:
+        new_mcq_sub = col_s2.text_input("New MCQ Notebook")
+        if col_s2.button("Add Notebook", key="btn_add_mcq_sub") and new_mcq_sub:
             st.session_state.db["mcq_subjects"][new_mcq_sub] = {
                 "sources": [],
                 "chat": [],
@@ -506,13 +507,46 @@ elif st.session_state.active_mode == "notebook_studio":
             st.rerun()
 
         if selected_mcq_sub and selected_mcq_sub != "None":
-            if col_s3.button("🗑️ Delete Subject", key="btn_del_mcq_sub"):
+            if col_s3.button("🗑️ Delete Notebook", key="btn_del_mcq_sub"):
                 del st.session_state.db["mcq_subjects"][selected_mcq_sub]
                 save_data(st.session_state.db)
-                st.success(f"Deleted subject '{selected_mcq_sub}'!")
+                st.success(f"Deleted notebook '{selected_mcq_sub}'!")
                 st.rerun()
 
             sub_data = st.session_state.db["mcq_subjects"][selected_mcq_sub]
+            if "sources" not in sub_data:
+                sub_data["sources"] = []
+
+            # --- NOTEBOOK LM SOURCE MANAGER PANEL ---
+            with st.expander(f"📚 Managed Persistent Sources for Notebook: '{selected_mcq_sub}' ({len(sub_data['sources'])} Saved)", expanded=True):
+                st.markdown("Upload files here once. They will stay saved in this notebook across all refreshes.")
+                new_mcq_files = st.file_uploader(
+                    "Add Sources to Notebook (PDF, DOCX, CSV, Images)",
+                    type=["pdf", "docx", "csv", "xlsx", "png", "jpg", "jpeg"],
+                    accept_multiple_files=True,
+                    key=f"mcq_sources_up_{selected_mcq_sub}",
+                )
+
+                if st.button("💾 Save Files to Notebook Sources", key=f"btn_save_mcq_sources_{selected_mcq_sub}"):
+                    if new_mcq_files:
+                        for nf in new_mcq_files:
+                            extracted_obj = extract_file_data(nf)
+                            sub_data["sources"].append(extracted_obj)
+                        save_data(st.session_state.db)
+                        st.success("Successfully saved sources to this notebook!")
+                        st.rerun()
+
+                if sub_data["sources"]:
+                    st.write("---")
+                    st.write("**Current Saved Sources in this Notebook:**")
+                    for s_idx, src in enumerate(sub_data["sources"]):
+                        sc1, sc2 = st.columns([5, 1])
+                        sc1.markdown(f"📄 **{src['name']}** *(Added {src['date']})*")
+                        if sc2.button("🗑️ Delete", key=f"del_mcq_src_{selected_mcq_sub}_{s_idx}"):
+                            sub_data["sources"].pop(s_idx)
+                            save_data(st.session_state.db)
+                            st.rerun()
+
             m_tab1, m_tab2 = st.tabs(["🎯 Quiz Generator & Practice", "📖 Mistakes Register & Notes"])
 
             with m_tab1:
@@ -532,13 +566,6 @@ elif st.session_state.active_mode == "notebook_studio":
                     save_data(st.session_state.db)
                     st.success("Instructions saved!")
 
-                mcq_files = st.file_uploader(
-                    "Attach Study Materials (Multiple PDFs, DOCX, CSV, Images)",
-                    type=["pdf", "docx", "csv", "xlsx", "png", "jpg", "jpeg"],
-                    accept_multiple_files=True,
-                    key="mcq_files_up",
-                )
-
                 if st.button("🚀 Generate Chapter Quiz"):
                     if not st.session_state.get("saved_openrouter_key"):
                         st.error("Please enter your API Key in the sidebar.")
@@ -546,9 +573,15 @@ elif st.session_state.active_mode == "notebook_studio":
                         client = get_openrouter_client(
                             st.session_state.saved_openrouter_key
                         )
-                        file_content, image_urls = (
-                            process_uploaded_files(mcq_files) if mcq_files else ("", [])
-                        )
+
+                        # Aggregate context from ALL saved sources in this notebook
+                        saved_sources_text = ""
+                        image_urls = []
+                        for src_item in sub_data.get("sources", []):
+                            saved_sources_text += f"\n\n--- Source File: {src_item['name']} ---\n{src_item['text']}"
+                            if src_item.get("image_url"):
+                                image_urls.append(src_item["image_url"])
+
                         prior_mistakes = [
                             f"- {m.get('concept', '')}: {m.get('takeaway', '')}"
                             for m in sub_data.get("mistakes", [])
@@ -558,7 +591,7 @@ elif st.session_state.active_mode == "notebook_studio":
                         )
 
                         prompt_text = f"""Language Requirement: {lang_choice}
-Subject: {selected_mcq_sub}
+Subject Notebook: {selected_mcq_sub}
 Difficulty Level: {diff}
 Target Questions Count: {num_q}
 
@@ -568,11 +601,11 @@ CUSTOM INSTRUCTIONS / CHAPTER FOCUS:
 LOGGED PAST MISTAKES & WEAKNESSES:
 {weakness_context}
 
-ATTACHED SOURCE MATERIALS / NOTES:
-{file_content}
+SAVED NOTEBOOK SOURCES & CONTEXT:
+{saved_sources_text if saved_sources_text else "No persistent sources uploaded yet. Generate based on subject domain."}
 
 GENERATE A QUIZ FOLLOWING THESE RULES:
-1. Target the chapter concepts in source materials and past logged weaknesses.
+1. Target the chapter concepts in saved source materials and past logged weaknesses.
 2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the text.
 3. DO NOT repeat exact duplicate questions from past mistakes; create NEW variations or deeper questions testing those concepts.
 4. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math.
@@ -589,7 +622,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                         else:
                             user_msg_content = prompt_text
 
-                        with st.status("🧠 Generating Targeted Quiz...", expanded=True):
+                        with st.status("🧠 Generating Targeted Quiz from Notebook Sources...", expanded=True):
                             try:
                                 res = client.chat.completions.create(
                                     model=selected_model_slug,
@@ -698,11 +731,11 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
         col_w1, col_w2, col_w3 = st.columns([2, 1, 1])
         w_subs = list(st.session_state.db["written_subjects"].keys())
         selected_w_sub = col_w1.selectbox(
-            "Select Subject", w_subs if w_subs else ["None"]
+            "Select Subject / Notebook", w_subs if w_subs else ["None"]
         )
 
-        new_w_sub = col_w2.text_input("New Written Subject")
-        if col_w2.button("Add Subject", key="btn_add_w_sub") and new_w_sub:
+        new_w_sub = col_w2.text_input("New Written Notebook")
+        if col_w2.button("Add Notebook", key="btn_add_w_sub") and new_w_sub:
             st.session_state.db["written_subjects"][new_w_sub] = {
                 "sources": [],
                 "chat": [],
@@ -713,13 +746,45 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
             st.rerun()
 
         if selected_w_sub and selected_w_sub != "None":
-            if col_w3.button("🗑️ Delete Subject", key="btn_del_w_sub"):
+            if col_w3.button("🗑️ Delete Notebook", key="btn_del_w_sub"):
                 del st.session_state.db["written_subjects"][selected_w_sub]
                 save_data(st.session_state.db)
-                st.success(f"Deleted subject '{selected_w_sub}'!")
+                st.success(f"Deleted notebook '{selected_w_sub}'!")
                 st.rerun()
 
             w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
+            if "sources" not in w_sub_data:
+                w_sub_data["sources"] = []
+
+            # --- NOTEBOOK LM SOURCE MANAGER PANEL ---
+            with st.expander(f"📚 Managed Persistent Sources for Notebook: '{selected_w_sub}' ({len(w_sub_data['sources'])} Saved)", expanded=True):
+                st.markdown("Upload files here once. They will stay saved in this notebook across all refreshes.")
+                new_w_files = st.file_uploader(
+                    "Add Sources to Notebook (PDF, DOCX, Images)",
+                    type=["pdf", "docx", "png", "jpg", "jpeg"],
+                    accept_multiple_files=True,
+                    key=f"written_sources_up_{selected_w_sub}",
+                )
+
+                if st.button("💾 Save Files to Notebook Sources", key=f"btn_save_w_sources_{selected_w_sub}"):
+                    if new_w_files:
+                        for nf in new_w_files:
+                            extracted_obj = extract_file_data(nf)
+                            w_sub_data["sources"].append(extracted_obj)
+                        save_data(st.session_state.db)
+                        st.success("Successfully saved sources to this notebook!")
+                        st.rerun()
+
+                if w_sub_data["sources"]:
+                    st.write("---")
+                    st.write("**Current Saved Sources in this Notebook:**")
+                    for s_idx, src in enumerate(w_sub_data["sources"]):
+                        sc1, sc2 = st.columns([5, 1])
+                        sc1.markdown(f"📄 **{src['name']}** *(Added {src['date']})*")
+                        if sc2.button("🗑️ Delete", key=f"del_w_src_{selected_w_sub}_{s_idx}"):
+                            w_sub_data["sources"].pop(s_idx)
+                            save_data(st.session_state.db)
+                            st.rerun()
 
             col_lang1, col_lang2 = st.columns([1, 2])
             lang_w_choice = col_lang1.selectbox("Evaluation Language", ["English", "Bangla (বাংলা)", "Bilingual (English + Bangla)"])
@@ -734,24 +799,24 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                 save_data(st.session_state.db)
                 st.success("Rubric criteria saved!")
 
-            written_files = st.file_uploader(
-                "Attach Context Materials (Multiple PDFs, DOCX, Images)",
-                type=["pdf", "docx", "png", "jpg", "jpeg"],
-                accept_multiple_files=True,
-                key="written_files_up",
-            )
             essay_input = st.text_area("Write or Paste Solution / Essay Submission", height=220)
 
             if st.button("🔍 Evaluate Submission"):
                 if not st.session_state.get("saved_openrouter_key"):
                     st.error("Please enter your API Key in the sidebar.")
-                elif not essay_input.strip() and not written_files:
-                    st.warning("Please enter a written solution or attach source files before evaluating.")
+                elif not essay_input.strip() and not w_sub_data["sources"]:
+                    st.warning("Please enter a written solution or ensure you have saved notebook sources.")
                 else:
                     client = get_openrouter_client(st.session_state.saved_openrouter_key)
-                    file_text, image_urls = (
-                        process_uploaded_files(written_files) if written_files else ("", [])
-                    )
+
+                    # Aggregate context from ALL saved sources in this notebook
+                    saved_sources_text = ""
+                    image_urls = []
+                    for src_item in w_sub_data.get("sources", []):
+                        saved_sources_text += f"\n\n--- Source File: {src_item['name']} ---\n{src_item['text']}"
+                        if src_item.get("image_url"):
+                            image_urls.append(src_item["image_url"])
+
                     prior_mistakes = [
                         f"- {m.get('area', '')}: {m.get('correction', '')}"
                         for m in w_sub_data.get("mistakes", [])
@@ -761,17 +826,17 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                     )
 
                     combined_text = (
-                        f"Student Submission:\n{essay_input}\n\nAttached Material:\n{file_text}"
+                        f"Student Submission:\n{essay_input}\n\nSAVED NOTEBOOK SOURCES:\n{saved_sources_text}"
                     )
 
                     prompt_text = f"""Language Requirement: {lang_w_choice}
-Subject: {selected_w_sub}
+Subject Notebook: {selected_w_sub}
 Evaluation Criteria: {custom_instructions}
 
 PAST LOGGED MISTAKES FOR THIS STUDENT:
 {weakness_context}
 
-SUBMISSION & CONTENT TO EVALUATE:
+SUBMISSION & CONTEXT TO EVALUATE:
 {combined_text}
 
 Provide detailed feedback, point out errors/mistakes, and output STRICT JSON format:
@@ -789,7 +854,7 @@ Provide detailed feedback, point out errors/mistakes, and output STRICT JSON for
                     else:
                         user_msg_content = prompt_text
 
-                    with st.status("🧠 Evaluating Written Solution...", expanded=True):
+                    with st.status("🧠 Evaluating Solution against Notebook Sources...", expanded=True):
                         try:
                             res = client.chat.completions.create(
                                 model=selected_model_slug,
