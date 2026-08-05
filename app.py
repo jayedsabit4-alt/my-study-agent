@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -12,10 +13,10 @@ st.set_page_config(
 DATA_FILE = "study_data.json"
 
 MODEL_OPTIONS = {
-    "openrouter/free (Auto-Router - Multimodal & Fast)": "openrouter/free",
     "google/gemma-4-31b-it:free (Vision & Document OCR)": (
         "google/gemma-4-31b-it:free"
     ),
+    "openrouter/free (Auto-Router - Multimodal & Fast)": "openrouter/free",
     "nvidia/nemotron-3-ultra-550b-a55b:free (Deep Reasoning)": (
         "nvidia/nemotron-3-ultra-550b-a55b:free"
     ),
@@ -27,7 +28,7 @@ MATH_SYSTEM_PROMPT = {
     "content": (
         "When rendering mathematical variables, formulas, or statistical notation, "
         "ALWAYS wrap them in standard LaTeX dollar signs. Use single dollar signs "
-        "for inline math (e.g., $\\mu$, $\\bar{x}$, $\\theta$) and double dollar signs "
+        "for inline math (e.g., \\mu, \\bar{x}, \\theta) and double dollar signs "
         "for standalone equations ($$...$$). NEVER use raw brackets like [ \\formula ] or "
         "( \\symbol ) for LaTeX equations."
     ),
@@ -132,25 +133,54 @@ if "active_chat" not in st.session_state:
     )
 
 
+# --- MULTIMODAL & VISION OCR FILE PROCESSOR ---
 def process_uploaded_file(uploaded_file):
+    """Processes text/documents and converts image files/scans into base64 data URLs for Vision LLMs."""
     if uploaded_file is None:
-        return ""
+        return "", []
+
     file_type = uploaded_file.name.split(".")[-1].lower()
     extracted_text = f"\n--- Attached File: {uploaded_file.name} ---\n"
+    image_urls = []
+
     try:
         if file_type in ["png", "jpg", "jpeg"]:
-            extracted_text += f"[Image / Handwritten Document File: {uploaded_file.name}]"
+            b64_img = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
+            mime = "image/png" if file_type == "png" else "image/jpeg"
+            image_urls.append(f"data:{mime};base64,{b64_img}")
+            extracted_text += f"[Handwritten/Image Document Attached: {uploaded_file.name}]"
+
         elif file_type == "pdf":
             from pypdf import PdfReader
 
             reader = PdfReader(uploaded_file)
+            pdf_text = ""
             for page in reader.pages:
-                extracted_text += page.extract_text() or ""
+                txt = page.extract_text()
+                if txt:
+                    pdf_text += txt + "\n"
+                
+                # Extract embedded scanned images for vision OCR processing
+                for img_obj in getattr(page, "images", []):
+                    try:
+                        b64_img = base64.b64encode(img_obj.data).decode("utf-8")
+                        ext = img_obj.name.split(".")[-1].lower()
+                        mime = "image/png" if ext == "png" else "image/jpeg"
+                        image_urls.append(f"data:{mime};base64,{b64_img}")
+                    except Exception:
+                        pass
+
+            if pdf_text.strip():
+                extracted_text += pdf_text
+            else:
+                extracted_text += "[Scanned/Handwritten PDF Document - Transcribing via Vision OCR]"
+
         elif file_type == "docx":
             from docx import Document
 
             doc = Document(uploaded_file)
             extracted_text += "\n".join([p.text for p in doc.paragraphs])
+
         elif file_type in ["csv", "xlsx"]:
             df = (
                 pd.read_csv(uploaded_file)
@@ -158,11 +188,14 @@ def process_uploaded_file(uploaded_file):
                 else pd.read_excel(uploaded_file)
             )
             extracted_text += df.to_string(index=False)
+
         else:
             extracted_text += uploaded_file.getvalue().decode("utf-8")
+
     except Exception as e:
         extracted_text += f"Error reading file: {str(e)}"
-    return extracted_text
+
+    return extracted_text, image_urls
 
 
 def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
@@ -294,7 +327,7 @@ if st.session_state.active_mode == "general_chat":
 
     with col_ctrl2:
         attached_file = st.file_uploader(
-            "Attach Context Material (PDF, DOCX, CSV, Image)",
+            "Attach Context Material (PDF, DOCX, CSV, Image, Handwritten Notes)",
             type=["png", "jpg", "jpeg", "pdf", "docx", "csv", "xlsx"],
             key="gen_chat_file",
         )
@@ -306,11 +339,11 @@ if st.session_state.active_mode == "general_chat":
             st.error("Please enter an OpenRouter API key in the sidebar first!")
         else:
             client = get_openrouter_client(st.session_state.saved_openrouter_key)
-            file_context = (
-                process_uploaded_file(attached_file) if attached_file else ""
+            file_text, image_urls = (
+                process_uploaded_file(attached_file) if attached_file else ("", [])
             )
             full_prompt = (
-                f"{user_query}\n{file_context}" if file_context else user_query
+                f"{user_query}\n{file_text}" if file_text else user_query
             )
 
             chat_history.append({"role": "user", "content": full_prompt})
@@ -329,8 +362,17 @@ if st.session_state.active_mode == "general_chat":
 
                     api_messages = [MATH_SYSTEM_PROMPT] + [
                         {"role": m["role"], "content": m["content"]}
-                        for m in chat_history[-6:]
+                        for m in chat_history[-6:-1]
                     ]
+
+                    # Construct multimodal payload if image URLs exist
+                    if image_urls:
+                        user_content = [{"type": "text", "text": full_prompt}]
+                        for img_url in image_urls[:3]:  # Limit to top 3 images
+                            user_content.append({"type": "image_url", "image_url": {"url": img_url}})
+                        api_messages.append({"role": "user", "content": user_content})
+                    else:
+                        api_messages.append({"role": "user", "content": full_prompt})
 
                     try:
                         response = client.chat.completions.create(
@@ -424,7 +466,6 @@ elif st.session_state.active_mode == "notebook_studio":
             save_data(st.session_state.db)
             st.rerun()
 
-        # Added Delete Subject functionality
         if selected_mcq_sub and selected_mcq_sub != "None":
             if col_s3.button("🗑️ Delete Subject", key="btn_del_mcq_sub"):
                 del st.session_state.db["mcq_subjects"][selected_mcq_sub]
@@ -465,7 +506,9 @@ elif st.session_state.active_mode == "notebook_studio":
                         client = get_openrouter_client(
                             st.session_state.saved_openrouter_key
                         )
-                        file_content = process_uploaded_file(mcq_file) if mcq_file else ""
+                        file_content, image_urls = (
+                            process_uploaded_file(mcq_file) if mcq_file else ("", [])
+                        )
                         prior_mistakes = [
                             f"- {m.get('concept', '')}: {m.get('takeaway', '')}"
                             for m in sub_data.get("mistakes", [])
@@ -474,7 +517,7 @@ elif st.session_state.active_mode == "notebook_studio":
                             "\n".join(prior_mistakes) if prior_mistakes else "None recorded yet."
                         )
 
-                        prompt = f"""Language Requirement: {lang_choice}
+                        prompt_text = f"""Language Requirement: {lang_choice}
 Subject: {selected_mcq_sub}
 Difficulty Level: {diff}
 Target Questions Count: {num_q}
@@ -490,13 +533,21 @@ ATTACHED SOURCE MATERIALS / NOTES:
 
 GENERATE A QUIZ FOLLOWING THESE RULES:
 1. Target the chapter concepts in source materials and past logged weaknesses.
-2. DO NOT repeat exact duplicate questions from past mistakes; create NEW variations or deeper questions testing those concepts.
-3. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math.
-4. Output STRICT raw JSON array format without markdown backticks:
+2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the handwritten Bengali/English text.
+3. DO NOT repeat exact duplicate questions from past mistakes; create NEW variations or deeper questions testing those concepts.
+4. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math.
+5. Output STRICT raw JSON array format without markdown backticks:
 [
   {{"id": 1, "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "correct": "A) ...", "explanation": "..."}}
 ]
 """
+
+                        if image_urls:
+                            user_msg_content = [{"type": "text", "text": prompt_text}]
+                            for img_url in image_urls[:3]:
+                                user_msg_content.append({"type": "image_url", "image_url": {"url": img_url}})
+                        else:
+                            user_msg_content = prompt_text
 
                         with st.status("🧠 Generating Targeted Quiz...", expanded=True):
                             try:
@@ -504,7 +555,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                                     model=selected_model_slug,
                                     messages=[
                                         MATH_SYSTEM_PROMPT,
-                                        {"role": "user", "content": prompt},
+                                        {"role": "user", "content": user_msg_content},
                                     ],
                                 )
                                 raw_json = clean_json_response(res.choices[0].message.content)
@@ -621,7 +672,6 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
             save_data(st.session_state.db)
             st.rerun()
 
-        # Added Delete Subject functionality for Written Workspace
         if selected_w_sub and selected_w_sub != "None":
             if col_w3.button("🗑️ Delete Subject", key="btn_del_w_sub"):
                 del st.session_state.db["written_subjects"][selected_w_sub]
@@ -645,7 +695,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                 st.success("Rubric criteria saved!")
 
             written_file = st.file_uploader(
-                "Attach Context Material (PDF, DOCX, Images, Notes)",
+                "Attach Context Material (PDF, DOCX, Images, Handwritten Notes)",
                 type=["pdf", "docx", "png", "jpg", "jpeg"],
                 key="written_file_up",
             )
@@ -654,12 +704,12 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
             if st.button("🔍 Evaluate Submission"):
                 if not st.session_state.get("saved_openrouter_key"):
                     st.error("Please enter your API Key in the sidebar.")
-                elif not essay_input.strip():
-                    st.warning("Please enter your written solution or essay before running evaluation.")
+                elif not essay_input.strip() and not written_file:
+                    st.warning("Please enter a written solution or attach a handwritten/scanned file before evaluating.")
                 else:
                     client = get_openrouter_client(st.session_state.saved_openrouter_key)
-                    file_text = (
-                        process_uploaded_file(written_file) if written_file else ""
+                    file_text, image_urls = (
+                        process_uploaded_file(written_file) if written_file else ("", [])
                     )
                     prior_mistakes = [
                         f"- {m.get('area', '')}: {m.get('correction', '')}"
@@ -673,7 +723,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                         f"Student Submission:\n{essay_input}\n\nAttached Material:\n{file_text}"
                     )
 
-                    prompt = f"""Language Requirement: {lang_w_choice}
+                    prompt_text = f"""Language Requirement: {lang_w_choice}
 Subject: {selected_w_sub}
 Evaluation Criteria: {custom_instructions}
 
@@ -691,13 +741,20 @@ Provide detailed feedback, point out errors/mistakes, and output STRICT JSON for
 }}
 """
 
+                    if image_urls:
+                        user_msg_content = [{"type": "text", "text": prompt_text}]
+                        for img_url in image_urls[:3]:
+                            user_msg_content.append({"type": "image_url", "image_url": {"url": img_url}})
+                    else:
+                        user_msg_content = prompt_text
+
                     with st.status("🧠 Evaluating Written Solution...", expanded=True):
                         try:
                             res = client.chat.completions.create(
                                 model=selected_model_slug,
                                 messages=[
                                     MATH_SYSTEM_PROMPT,
-                                    {"role": "user", "content": prompt},
+                                    {"role": "user", "content": user_msg_content},
                                 ],
                             )
                             raw_json = clean_json_response(res.choices[0].message.content)
