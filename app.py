@@ -1,9 +1,11 @@
 import base64
+import io
 import json
 import os
 import re
 from datetime import datetime
 import pandas as pd
+from PIL import Image
 import streamlit as st
 
 st.set_page_config(
@@ -28,27 +30,52 @@ MATH_SYSTEM_PROMPT = {
     "content": (
         "When rendering mathematical variables, formulas, or statistical notation, "
         "ALWAYS wrap them in standard LaTeX dollar signs. Use single dollar signs "
-        "for inline math (e.g., \\mu, \\bar{x}, \\theta) and double dollar signs "
-        "for standalone equations ($$...$$). NEVER use raw brackets like [ \\formula ] or "
-        "( \\symbol ) for LaTeX equations."
+        "for inline math (e.g., $\\mu$, $\\bar{x}$, $\\theta$) and double dollar signs "
+        "for standalone equations ($$...$$).\n\n"
+        "FOR MULTI-LINE ALIGNED EQUATIONS, wrap the entire block in single outer double-dollar signs:\n"
+        "$$\\begin{aligned}\n"
+        "a &= b \\\\\n"
+        "c &= d\n"
+        "\\end{aligned}$$\n\n"
+        "NEVER place $$ directly around \\begin{aligned} or \\end{aligned}."
     ),
 }
 
 
 # --- LATEX REGEX CLEANER ---
 def fix_latex_formatting(text: str) -> str:
-    """Cleans up raw LLM bracket outputs and converts them to standard KaTeX delimiters."""
+    """Cleans up raw LLM bracket outputs and fixes nested block delimiters for KaTeX."""
     if not text:
         return ""
-    text = re.sub(r"\\\[(.*?)\\\]", r"$$\1$$", text, flags=re.DOTALL)
+
+    # 1. Convert bracket notation [ ... ] and \( ... \) to $ / $$
+    text = re.sub(r"\\\[\s*(.*?)\s*\\\]", r"$$\1$$", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\w)\[\s*(\\.*?)\s*\]", r"$$\1$$", text, flags=re.DOTALL)
-    text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text, flags=re.DOTALL)
+    text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\w)\(\s*(\\.*?)\s*\)", r"$\1$", text, flags=re.DOTALL)
+
+    # 2. Fix broken/nested $$ tags around environments
     text = re.sub(
-        r"(?m)^\\(frac|sqrt|left|mathrm|mathbf|begin|end|boldsymbol)\{.*\}$",
-        r"$$\g<0>$$",
+        r"\$\$\s*(\\begin\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
+        r"$$\1",
         text,
     )
+    text = re.sub(
+        r"\$\$\s*(\\end\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
+        r"\1$$",
+        text,
+    )
+    text = re.sub(
+        r"(\\begin\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
+        r"\1",
+        text,
+    )
+    text = re.sub(
+        r"\$\$\s*(\\end\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})",
+        r"\1",
+        text,
+    )
+
     return text
 
 
@@ -133,9 +160,26 @@ if "active_chat" not in st.session_state:
     )
 
 
+# --- IMAGE COMPRESSION HELPER ---
+def compress_image_to_b64(image_bytes, max_dim=1200, quality=80):
+    """Resizes and compresses images to JPEG before base64 encoding for fast API delivery."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail((max_dim, max_dim))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64_str}"
+    except Exception:
+        b64_str = base64.b64encode(image_bytes).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64_str}"
+
+
 # --- MULTIMODAL & VISION OCR FILE PROCESSOR ---
 def process_uploaded_file(uploaded_file):
-    """Processes text/documents and converts image files/scans into base64 data URLs for Vision LLMs."""
+    """Processes text/documents and converts image files/scans into lightweight base64 URLs."""
     if uploaded_file is None:
         return "", []
 
@@ -145,9 +189,8 @@ def process_uploaded_file(uploaded_file):
 
     try:
         if file_type in ["png", "jpg", "jpeg"]:
-            b64_img = base64.b64encode(uploaded_file.getvalue()).decode("utf-8")
-            mime = "image/png" if file_type == "png" else "image/jpeg"
-            image_urls.append(f"data:{mime};base64,{b64_img}")
+            compressed_url = compress_image_to_b64(uploaded_file.getvalue())
+            image_urls.append(compressed_url)
             extracted_text += f"[Handwritten/Image Document Attached: {uploaded_file.name}]"
 
         elif file_type == "pdf":
@@ -155,20 +198,21 @@ def process_uploaded_file(uploaded_file):
 
             reader = PdfReader(uploaded_file)
             pdf_text = ""
-            for page in reader.pages:
+            for page_idx, page in enumerate(reader.pages):
                 txt = page.extract_text()
                 if txt:
                     pdf_text += txt + "\n"
                 
-                # Extract embedded scanned images for vision OCR processing
-                for img_obj in getattr(page, "images", []):
-                    try:
-                        b64_img = base64.b64encode(img_obj.data).decode("utf-8")
-                        ext = img_obj.name.split(".")[-1].lower()
-                        mime = "image/png" if ext == "png" else "image/jpeg"
-                        image_urls.append(f"data:{mime};base64,{b64_img}")
-                    except Exception:
-                        pass
+                # Convert embedded images from PDF pages (capped at first 2 images max for speed)
+                if len(image_urls) < 2:
+                    for img_obj in getattr(page, "images", []):
+                        try:
+                            compressed_url = compress_image_to_b64(img_obj.data)
+                            image_urls.append(compressed_url)
+                            if len(image_urls) >= 2:
+                                break
+                        except Exception:
+                            pass
 
             if pdf_text.strip():
                 extracted_text += pdf_text
@@ -365,10 +409,9 @@ if st.session_state.active_mode == "general_chat":
                         for m in chat_history[-6:-1]
                     ]
 
-                    # Construct multimodal payload if image URLs exist
                     if image_urls:
                         user_content = [{"type": "text", "text": full_prompt}]
-                        for img_url in image_urls[:3]:  # Limit to top 3 images
+                        for img_url in image_urls[:2]:
                             user_content.append({"type": "image_url", "image_url": {"url": img_url}})
                         api_messages.append({"role": "user", "content": user_content})
                     else:
@@ -533,7 +576,7 @@ ATTACHED SOURCE MATERIALS / NOTES:
 
 GENERATE A QUIZ FOLLOWING THESE RULES:
 1. Target the chapter concepts in source materials and past logged weaknesses.
-2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the handwritten Bengali/English text.
+2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the handwritten text.
 3. DO NOT repeat exact duplicate questions from past mistakes; create NEW variations or deeper questions testing those concepts.
 4. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math.
 5. Output STRICT raw JSON array format without markdown backticks:
@@ -544,7 +587,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
 
                         if image_urls:
                             user_msg_content = [{"type": "text", "text": prompt_text}]
-                            for img_url in image_urls[:3]:
+                            for img_url in image_urls[:2]:
                                 user_msg_content.append({"type": "image_url", "image_url": {"url": img_url}})
                         else:
                             user_msg_content = prompt_text
@@ -743,7 +786,7 @@ Provide detailed feedback, point out errors/mistakes, and output STRICT JSON for
 
                     if image_urls:
                         user_msg_content = [{"type": "text", "text": prompt_text}]
-                        for img_url in image_urls[:3]:
+                        for img_url in image_urls[:2]:
                             user_msg_content.append({"type": "image_url", "image_url": {"url": img_url}})
                     else:
                         user_msg_content = prompt_text
