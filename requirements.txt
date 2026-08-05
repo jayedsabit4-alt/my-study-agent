@@ -1,4 +1,7 @@
 streamlit
 openai
 python-docx
-tenacity
+pypdf
+pandas
+openpyxl
+pillow
