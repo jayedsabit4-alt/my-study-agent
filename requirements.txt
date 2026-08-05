@@ -5,10 +5,5 @@ openai
 pdfplumber
 pypdf
 python-docx
-scikit-learnstreamlit
-openai
-python-docx
-pypdf
-pandas
+scikit-learn
 openpyxl
-pillow
