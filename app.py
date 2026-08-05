@@ -11,53 +11,67 @@ import streamlit as st
 
 
 
+import streamlit as st
+import streamlit.components.v1 as components
 
-# 1. Page Configuration
+# 1. Page Configuration (Wide layout removes heavy centered margins)
 st.set_page_config(
     page_title="AI Study Notebook",
     page_icon="🎓",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# 2. CSS: Lock horizontal scroll (anti-wobble) & restore sidebar icon
+# 2. Custom CSS: Flush-left alignment, locked horizontal scroll, and mobile optimization
 st.markdown(
     """
     <style>
-    /* Prevent horizontal page wobble entirely */
+    /* Stop horizontal screen wobbling */
     html, body, [data-testid="stAppViewContainer"], .main {
         overflow-x: hidden !important;
         max-width: 100vw !important;
     }
 
-    /* Container alignment for mobile screen width */
+    /* Shift main block container flush to the left */
     .block-container {
-        padding-top: 3.5rem !important; /* Space for the top sidebar toggle icon */
-        padding-bottom: 2rem !important;
-        padding-left: 0.75rem !important;
-        padding-right: 0.75rem !important;
+        padding-top: 3rem !important;
+        padding-bottom: 5rem !important;
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
         max-width: 100% !important;
-        box-sizing: border-box !important;
     }
 
-    /* Make header transparent so top-left sidebar menu button is visible */
+    /* Force headers, paragraphs, and list items to align strictly to the left edge */
+    h1, h2, h3, h4, h5, h6, p, ul, ol, li, .stMarkdown {
+        text-align: left !important;
+        margin-left: 0 !important;
+    }
+
+    /* Keep bullet points compact without huge indents */
+    ul, ol {
+        padding-left: 1.1rem !important;
+        margin-left: 0 !important;
+    }
+
+    /* Keep top sidebar toggle button visible */
     header[data-testid="stHeader"] {
         background-color: transparent !important;
         z-index: 99999 !important;
     }
 
-    /* Force all text, code blocks, and chat bubbles to wrap inside the screen width */
+    /* Force text wrapping to prevent right overflow */
     * {
         box-sizing: border-box !important;
     }
-    
     p, span, div, code, pre {
         white-space: pre-wrap !important;
         word-break: break-word !important;
         overflow-wrap: anywhere !important;
     }
 
-    /* Chat input & text field constraints */
+    /* Mobile rounded inputs and action buttons */
     .stTextInput > div > div > input, .stTextArea textarea {
         border-radius: 16px !important;
         max-width: 100% !important;
@@ -71,6 +85,52 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+# 3. Floating "Scroll to Bottom" Button (Fixed at Bottom-Right)
+components.html(
+    """
+    <style>
+    #scroll-down-btn {
+        position: fixed;
+        bottom: 25px;
+        right: 20px;
+        z-index: 999999;
+        background-color: #3b82f6;
+        color: white;
+        border: none;
+        border-radius: 50%;
+        width: 46px;
+        height: 46px;
+        font-size: 22px;
+        font-weight: bold;
+        box-shadow: 0px 4px 12px rgba(0,0,0,0.35);
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+    }
+    #scroll-down-btn:active {
+        transform: scale(0.90);
+        background-color: #1d4ed8;
+    }
+    </style>
+    
+    <button id="scroll-down-btn" onclick="scrollToBottom()">↓</button>
+
+    <script>
+    function scrollToBottom() {
+        const mainContainer = window.parent.document.querySelector('[data-testid="stAppViewContainer"]') || window.parent.document.documentElement;
+        mainContainer.scrollTo({
+            top: mainContainer.scrollHeight,
+            behavior: 'smooth'
+        });
+    }
+    </script>
+    """,
+    height=0,
+)
+
 # Optional sklearn dependency for local RAG vector similarity
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
