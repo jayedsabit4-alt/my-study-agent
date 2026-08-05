@@ -1,12 +1,9 @@
-import base64
 from datetime import datetime
 import json
 import os
-from io import BytesIO
 from docx import Document
 from openai import OpenAI
 import pandas as pd
-from PIL import Image
 from pypdf import PdfReader
 import streamlit as st
 
@@ -16,7 +13,6 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
-# --- CURATED ACTIVE FREE MODEL DICTIONARY ---
 MODEL_OPTIONS = {
     "openrouter/free (Auto-Router - Best Active Free Model)": "openrouter/free",
     (
@@ -30,12 +26,8 @@ MODEL_OPTIONS = {
         "google/gemma-4-31b-it:free"
     ),
     "openai/gpt-oss-20b:free (Fast & Lightweight Chat)": "openai/gpt-oss-20b:free",
-    "inclusionai/ling-3.0-flash:free (Fast General Assistant)": (
-        "inclusionai/ling-3.0-flash:free"
-    ),
 }
 
-# Explicit Math formatting system prompt
 MATH_SYSTEM_PROMPT = {
     "role": "system",
     "content": (
@@ -49,14 +41,14 @@ MATH_SYSTEM_PROMPT = {
 }
 
 
-# --- PERSISTENCE LOGIC ---
+# --- SAFE PERSISTENCE LOGIC WITH FALLBACK ---
 def load_data():
   if os.path.exists(DATA_FILE):
     try:
       with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
     except Exception:
-      pass
+      st.warning("⚠️ Could not read saved data file. Creating fresh state.")
   return {
       "chats": {"Default Chat": []},
       "mcq_subjects": {
@@ -69,8 +61,11 @@ def load_data():
 
 
 def save_data(data):
-  with open(DATA_FILE, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
+  try:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+      json.dump(data, f, ensure_ascii=False, indent=2)
+  except Exception as e:
+    st.error(f"Failed to save data: {e}")
 
 
 if "db" not in st.session_state:
@@ -84,14 +79,11 @@ if "active_chat" not in st.session_state:
   st.session_state.active_chat = chats[0] if chats else "Default Chat"
 
 
-# --- FILE PARSER HELPER ---
 def process_uploaded_file(uploaded_file):
   if uploaded_file is None:
     return ""
-
   file_type = uploaded_file.name.split(".")[-1].lower()
   extracted_text = f"\n--- Attached File Context: {uploaded_file.name} ---\n"
-
   try:
     if file_type in ["png", "jpg", "jpeg"]:
       extracted_text += f"[Image Attached: {uploaded_file.name}]"
@@ -113,14 +105,12 @@ def process_uploaded_file(uploaded_file):
       extracted_text += uploaded_file.getvalue().decode("utf-8")
   except Exception as e:
     extracted_text += f"Error parsing file: {str(e)}"
-
   return extracted_text
 
 
 def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   doc = Document()
   doc.add_heading(f"{section_type} Revision Guide: {subject_name}", level=0)
-
   if not mistakes_list:
     doc.add_paragraph("No weak spots logged yet.")
   for item in mistakes_list:
@@ -130,13 +120,12 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
     p.add_run(
         f"Takeaway: {item.get('takeaway', item.get('correction', 'N/A'))}"
     )
-
   filename = f"{subject_name}_{section_type}_Revision.docx"
   doc.save(filename)
   return filename
 
 
-# --- SIDEBAR: OPENROUTER AUTH & THREADS ---
+# --- SIDEBAR ---
 with st.sidebar:
   st.title("🎓 OpenRouter Studio")
 
@@ -152,9 +141,9 @@ with st.sidebar:
 
   if api_key:
     st.session_state.saved_openrouter_key = api_key
+    # TIMEOUT ADDED HERE TO PREVENT INFINITE HANGING
     client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=25.0
     )
   else:
     st.info("👈 Enter your free OpenRouter API Key to start.")
@@ -224,7 +213,6 @@ with st.sidebar:
 if st.session_state.active_mode == "general_chat":
   st.title(f"💬 {st.session_state.active_chat}")
 
-  # Model Selection Box inside General Chat View
   selected_label = st.selectbox(
       "🌐 Select AI Model",
       options=list(MODEL_OPTIONS.keys()),
@@ -239,7 +227,6 @@ if st.session_state.active_mode == "general_chat":
       st.session_state.active_chat, []
   )
 
-  # Display Messages & Copy Code Section
   for msg in chat_history:
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
@@ -299,32 +286,38 @@ if st.session_state.active_mode == "general_chat":
           if len(chat_history) == 2 and st.session_state.active_chat.startswith(
               "Chat "
           ):
-            title_res = client.chat.completions.create(
-                model=selected_model_slug,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Generate a concise 3-4 word title for a chat based"
-                        f" on this prompt: {user_query}"
-                    ),
-                }],
-            )
-            auto_title = (
-                title_res.choices[0]
-                .message.content.strip()
-                .replace('"', "")[:25]
-            )
-            st.session_state.db["chats"][auto_title] = st.session_state.db[
-                "chats"
-            ].pop(st.session_state.active_chat)
-            st.session_state.active_chat = auto_title
+            try:
+              title_res = client.chat.completions.create(
+                  model=selected_model_slug,
+                  messages=[{
+                      "role": "user",
+                      "content": (
+                          "Generate a concise 3-4 word title for a chat based"
+                          f" on this prompt: {user_query}"
+                      ),
+                  }],
+              )
+              auto_title = (
+                  title_res.choices[0]
+                  .message.content.strip()
+                  .replace('"', "")[:25]
+              )
+              st.session_state.db["chats"][auto_title] = st.session_state.db[
+                  "chats"
+              ].pop(st.session_state.active_chat)
+              st.session_state.active_chat = auto_title
+            except Exception:
+              pass
 
           save_data(st.session_state.db)
           st.rerun()
 
         except Exception as e:
-          status.update(label="❌ Generation Failed", state="error")
-          st.error(f"Error: {str(e)}")
+          status.update(label="❌ Generation Failed / Timed Out", state="error")
+          st.error(
+              f"Error: {str(e)}. Try selecting a different model from the"
+              " dropdown above."
+          )
 
 # ==========================================
 # VIEW 2: NOTEBOOK WORKSPACES
@@ -338,9 +331,6 @@ elif st.session_state.active_mode == "notebook_studio":
       horizontal=True,
   )
 
-  # ----------------------------------------------------
-  # MCQ WORKSPACE
-  # ----------------------------------------------------
   if workspace_type == "📝 MCQ Workspace":
     col_s1, col_s2 = st.columns([3, 1])
     mcq_subs = list(st.session_state.db["mcq_subjects"].keys())
@@ -373,8 +363,6 @@ elif st.session_state.active_mode == "notebook_studio":
 
         if st.button("Generate Quiz"):
           file_content = process_uploaded_file(mcq_file) if mcq_file else ""
-
-          # Retrieve existing weak spots to target in this new quiz
           prior_mistakes = [
               m.get("concept", "") for m in sub_data.get("mistakes", [])
           ]
@@ -392,7 +380,6 @@ elif st.session_state.active_mode == "notebook_studio":
               ' markdown:\n[{"id":1,"question":"...","options":["A)...","B)...","C)...","D)..."],"correct":"A)...","explanation":"..."}]'
           )
 
-          # Multimodal / Strongest Vision Model for question bank parsing
           notebook_model = "google/gemma-4-31b-it:free"
 
           with st.status(
@@ -409,4 +396,148 @@ elif st.session_state.active_mode == "notebook_studio":
               raw_text = (
                   res.choices[0]
                   .message.content.replace("```json", "")
-                  .replace("
+                  .replace("```", "")
+                  .strip()
+              )
+              st.session_state.quiz = json.loads(raw_text)
+            except Exception as qe:
+              st.error(f"Quiz Generation Error: {str(qe)}")
+
+        if "quiz" in st.session_state:
+          user_ans = {}
+          with st.form("mcq_form"):
+            for q in st.session_state.quiz:
+              st.write(f"**Q{q['id']}: {q['question']}**")
+              user_ans[q["id"]] = st.radio(
+                  f"Option for Q{q['id']}", q["options"]
+              )
+            submit_m = st.form_submit_button("Submit Quiz")
+
+          if submit_m:
+            score = 0
+            existing_concepts = [
+                m["concept"] for m in sub_data.get("mistakes", [])
+            ]
+
+            for q in st.session_state.quiz:
+              if user_ans[q["id"]] == q["correct"]:
+                score += 1
+                st.success(f"Q{q['id']} Correct! 🎉")
+              else:
+                st.error(f"Q{q['id']} Incorrect. Correct: {q['correct']}")
+                st.info(f"💡 Explanation: {q['explanation']}")
+
+                if q["question"] not in existing_concepts:
+                  sub_data["mistakes"].append({
+                      "date": datetime.now().strftime("%Y-%m-%d"),
+                      "concept": q["question"],
+                      "takeaway": q["explanation"],
+                  })
+                else:
+                  for ex_m in sub_data["mistakes"]:
+                    if ex_m["concept"] == q["question"]:
+                      ex_m["date"] = datetime.now().strftime("%Y-%m-%d")
+
+            st.metric("Score", f"{score} / {len(st.session_state.quiz)}")
+            save_data(st.session_state.db)
+
+      with m_tab2:
+        for m in sub_data.get("mistakes", []):
+          st.write(f"- **{m['concept']}**: {m['takeaway']}")
+
+        if st.button("Export MCQ Revision Guide (.docx)"):
+          fpath = generate_docx(
+              selected_mcq_sub, sub_data["mistakes"], "MCQ"
+          )
+          with open(fpath, "rb") as fp:
+            st.download_button("📥 Download Document", fp, file_name=fpath)
+
+  elif workspace_type == "✍️ Focus Written Workspace":
+    col_w1, col_w2 = st.columns([3, 1])
+    w_subs = list(st.session_state.db["written_subjects"].keys())
+    selected_w_sub = col_w1.selectbox(
+        "Select Written Subject", w_subs if w_subs else ["None"]
+    )
+
+    new_w_sub = col_w2.text_input("New Written Subject")
+    if col_w2.button("Add ") and new_w_sub:
+      st.session_state.db["written_subjects"][new_w_sub] = {
+          "sources": [],
+          "chat": [],
+          "mistakes": [],
+      }
+      save_data(st.session_state.db)
+      st.rerun()
+
+    if selected_w_sub and selected_w_sub != "None":
+      w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
+
+      st.subheader("⏱️ Custom Prompt & Evaluation Rules")
+      custom_instructions = st.text_area(
+          "Rules / Rubric for Evaluation",
+          "Focus on clarity, analytical depth, structural coherence, and"
+          " proper vocabulary.",
+          height=80,
+      )
+
+      written_file = st.file_uploader(
+          "Attach Reference File or Essay Document",
+          type=["pdf", "docx", "png", "jpg"],
+          key="written_file_up",
+      )
+
+      essay_input = st.text_area("Write / Paste your Essay here", height=180)
+
+      if st.button("Evaluate Essay"):
+        file_text = (
+            process_uploaded_file(written_file) if written_file else ""
+        )
+        combined_text = (
+            f"Essay Text: {essay_input}\nAttached Context: {file_text}"
+        )
+
+        prompt = (
+            f"Evaluate essay for subject '{selected_w_sub}'. Rules:"
+            f" {custom_instructions}.\nContent: {combined_text}\nOutput"
+            ' STRICT JSON:\n{"score":"85%","weakness":"...","strategy":"..."}'
+        )
+
+        notebook_reasoning_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+
+        with st.status("🧠 AI is Evaluating Your Essay...", expanded=True):
+          try:
+            res = client.chat.completions.create(
+                model=notebook_reasoning_model,
+                messages=[
+                    MATH_SYSTEM_PROMPT,
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            raw_text = (
+                res.choices[0]
+                .message.content.replace("```json", "")
+                .replace("```", "")
+                .strip()
+            )
+            eval_data = json.loads(raw_text)
+
+            st.metric("Evaluation Score", eval_data["score"])
+            st.info(f"**Weakness Area**: {eval_data['weakness']}")
+            st.success(f"**Strategy / Takeaway**: {eval_data['strategy']}")
+
+            w_sub_data["mistakes"].append({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "area": eval_data["weakness"],
+                "correction": eval_data["strategy"],
+            })
+            save_data(st.session_state.db)
+          except Exception as we:
+            st.error(f"Evaluation Error: {str(we)}")
+
+      st.divider()
+      if st.button("Export Essay Revision Guide (.docx)"):
+        fpath = generate_docx(
+            selected_w_sub, w_sub_data["mistakes"], "Written"
+        )
+        with open(fpath, "rb") as fp:
+          st.download_button("📥 Download Revision Guide", fp, file_name=fpath)
