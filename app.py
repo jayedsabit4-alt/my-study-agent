@@ -9,7 +9,7 @@ import pandas as pd
 from PIL import Image
 import streamlit as st
 
-# Optional sklearn dependency for lightweight local RAG embeddings
+# Optional sklearn dependency for local RAG vector similarity
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
@@ -23,35 +23,34 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
-# Expanded list of free models - kept intact and extended
+# Updated list of verified active free models on OpenRouter
 MODEL_OPTIONS = {
-    "google/gemma-4-31b-it:free (Vision & Document OCR)": (
-        "google/gemma-4-31b-it:free"
-    ),
-    "google/gemma-2-9b-it:free (Fast Multimodal)": "google/gemma-2-9b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free (High Accuracy)": (
-        "meta-llama/llama-3.3-70b-instruct:free"
-    ),
     "openrouter/free (Auto-Router - Highest Uptime)": "openrouter/free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free (Deep Reasoning)": (
+    "google/gemma-2-9b-it:free (Fast & Multimodal)": "google/gemma-2-9b-it:free",
+    "meta-llama/llama-3.1-8b-instruct:free (High Accuracy)": (
+        "meta-llama/llama-3.1-8b-instruct:free"
+    ),
+    "qwen/qwen-2.5-72b-instruct:free (Deep Reasoning & Math)": (
+        "qwen/qwen-2.5-72b-instruct:free"
+    ),
+    "deepseek/deepseek-r1:free (Advanced Problem Solving)": (
+        "deepseek/deepseek-r1:free"
+    ),
+    "nvidia/nemotron-3-ultra-550b-a55b:free (Complex Logic)": (
         "nvidia/nemotron-3-ultra-550b-a55b:free"
     ),
-    "openai/gpt-oss-20b:free (Lightweight Chat)": "openai/gpt-oss-20b:free",
-    "qwen/qwen-2.5-coder-32b-instruct:free (Math & Logic)": (
-        "qwen/qwen-2.5-coder-32b-instruct:free"
-    ),
-    "mistralai/mistral-7b-instruct:free (Fast Reasoning)": (
+    "mistralai/mistral-7b-instruct:free (Fast Processing)": (
         "mistralai/mistral-7b-instruct:free"
     ),
 }
 
+# Fallback sequence for rate limits / 404 model unavailability
 FALLBACK_MODELS = [
-    "google/gemma-4-31b-it:free",
     "openrouter/free",
-    "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-2-9b-it:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "qwen/qwen-2.5-coder-32b-instruct:free",
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
 ]
 
 MATH_SYSTEM_PROMPT = {
@@ -131,7 +130,6 @@ def retrieve_relevant_chunks(documents: list, query: str, top_k: int = 5, chunk_
         if not text or text.startswith("[Image Document"):
             continue
         
-        # Chunking with sliding window
         for i in range(0, len(text), chunk_size - 100):
             chunk = text[i : i + chunk_size]
             if len(chunk.strip()) > 50:
@@ -157,7 +155,6 @@ def retrieve_relevant_chunks(documents: list, query: str, top_k: int = 5, chunk_
         except Exception:
             pass
 
-    # Keyword search fallback
     query_words = set(query.lower().split())
     scored_chunks = []
     for c in all_chunks:
@@ -171,7 +168,6 @@ def retrieve_relevant_chunks(documents: list, query: str, top_k: int = 5, chunk_
 
 # --- SUPERMEMO-2 (SM-2) SPACED REPETITION ALGORITHM ---
 def calculate_sm2(quality: int, repetitions: int, interval: int, easiness_factor: float):
-    """Calculates next review interval and EF according to SuperMemo-2 algorithm."""
     if quality >= 3:
         if repetitions == 0:
             interval = 1
@@ -190,6 +186,33 @@ def calculate_sm2(quality: int, repetitions: int, interval: int, easiness_factor
 
     next_date = (datetime.now() + timedelta(days=interval)).strftime("%Y-%m-%d")
     return repetitions, interval, round(easiness_factor, 2), next_date
+
+
+# --- UNIVERSAL MODEL EXECUTION WITH FALLBACK ---
+def execute_completion_with_fallback(client, messages, preferred_model, status_box=None):
+    """Executes chat completion with automatic fallback retry loop across free models."""
+    candidates = [preferred_model] + [m for m in FALLBACK_MODELS if m != preferred_model]
+    last_err = None
+
+    for model_candidate in candidates:
+        try:
+            if status_box:
+                status_box.write(f"📡 Querying model: `{model_candidate}`...")
+            
+            res = client.chat.completions.create(
+                model=model_candidate,
+                messages=messages,
+            )
+            content = res.choices[0].message.content
+            if content and content.strip():
+                return content, model_candidate
+        except Exception as ex:
+            last_err = str(ex)
+            if status_box:
+                status_box.write(f"⚠️ `{model_candidate}` unavailable ({last_err[:60]}...). Retrying backup model...")
+            continue
+
+    raise Exception(f"All free models overloaded or unavailable. Last error: {last_err}")
 
 
 # --- DATA PERSISTENCE ---
@@ -566,7 +589,6 @@ if st.session_state.active_mode == "general_chat":
                     
                     success = False
                     last_error = None
-                    rate_limit_encountered = False
 
                     for model_candidate in candidate_models:
                         try:
@@ -598,24 +620,12 @@ if st.session_state.active_mode == "general_chat":
 
                         except Exception as ex:
                             last_error = str(ex)
-                            err_str_lower = last_error.lower()
-                            if "429" in last_error or "rate limit" in err_str_lower or "quota" in err_str_lower:
-                                rate_limit_encountered = True
-                                status.write(f"⏳ Rate limit reached for `{model_candidate}`. Switching model...")
-                            else:
-                                status.write(f"⚠️ `{model_candidate}` failed. Trying fallback...")
+                            status.write(f"⚠️ `{model_candidate}` unavailable ({last_error[:60]}...). Trying backup model...")
                             full_response = ""
 
                     if not success:
-                        status.update(label="❌ Free Tier Temporarily Exhausted", state="error")
-                        rate_limit_notice = ""
-                        if rate_limit_encountered:
-                            rate_limit_notice = (
-                                "🛑 **Free Tier Daily/Per-Minute Quota Exceeded**\n\n"
-                                "• **Reset Time**: OpenRouter free-tier limits reset hourly or at **00:00 UTC**.\n"
-                                "• **Action**: Click **'🔄 Regenerate / Retry Response'** in 30s or select another model.\n\n"
-                            )
-                        err_msg = f"{rate_limit_notice}⚠️ **Error Details**: `{last_error}`"
+                        status.update(label="❌ All Free Models Unavailable", state="error")
+                        err_msg = f"⚠️ **Error Details**: `{last_error}`\n\nPlease retry in 30 seconds."
                         st.error(err_msg)
                         chat_history.append({"role": "assistant", "content": err_msg})
                         st.session_state.db["chats"][st.session_state.active_chat] = chat_history
@@ -691,7 +701,6 @@ elif st.session_state.active_mode == "notebook_studio":
             if "flashcards" not in sub_data:
                 sub_data["flashcards"] = []
 
-            # --- NOTEBOOK SOURCE MANAGER PANEL WITH LOCAL RAG STATUS ---
             with st.expander(f"📚 Persistent Sources for '{selected_mcq_sub}' ({len(sub_data['sources'])} Saved)", expanded=True):
                 st.markdown("Upload files here once. Local Vector Retrieval automatically chunks and retrieves context.")
                 new_mcq_files = st.file_uploader(
@@ -753,7 +762,6 @@ elif st.session_state.active_mode == "notebook_studio":
                     else:
                         client = get_openrouter_client(st.session_state.saved_openrouter_key)
 
-                        # Retrieve relevant vector context via Local RAG
                         rag_context = retrieve_relevant_chunks(
                             sub_data.get("sources", []), 
                             query=f"{selected_mcq_sub} {custom_instructions}",
@@ -790,17 +798,17 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
 ]
 """
 
-                        with st.status("🧠 Retrieving Context & Generating Quiz...", expanded=True):
+                        with st.status("🧠 Retrieving Context & Generating Quiz...", expanded=True) as sbox:
                             try:
-                                res = client.chat.completions.create(
-                                    model=selected_model_slug,
-                                    messages=[
-                                        MATH_SYSTEM_PROMPT,
-                                        {"role": "user", "content": prompt_text},
-                                    ],
+                                response_text, used_model = execute_completion_with_fallback(
+                                    client,
+                                    [MATH_SYSTEM_PROMPT, {"role": "user", "content": prompt_text}],
+                                    selected_model_slug,
+                                    status_box=sbox
                                 )
-                                raw_json = clean_json_response(res.choices[0].message.content)
+                                raw_json = clean_json_response(response_text)
                                 st.session_state.quiz = json.loads(raw_json)
+                                sbox.update(label=f"✅ Quiz Generated via `{used_model}`", state="complete")
                             except Exception as qe:
                                 st.error(f"Quiz Generation Error: {str(qe)}")
 
@@ -836,7 +844,6 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                                 st.error(f"Q{q['id']} Incorrect (Selected: {selected}). Correct: {q['correct']}")
                                 st.info(f"💡 Explanation: {fix_latex_formatting(q['explanation'])}")
 
-                                # Add to mistakes register and auto-generate SM-2 flashcard
                                 if q["question"] not in existing_concepts:
                                     sub_data["mistakes"].append({
                                         "date": datetime.now().strftime("%Y-%m-%d"),
@@ -864,7 +871,6 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                         mcol3.metric("Correct / Wrong", f"{correct_cnt} / {wrong_cnt}")
                         mcol4.metric("Penalty Deduction", f"-{wrong_cnt * penalty_rate:.2f}")
 
-                        # Save to overall analytics history
                         st.session_state.db["analytics"].append({
                             "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                             "subject": selected_mcq_sub,
@@ -1100,16 +1106,15 @@ Provide detailed feedback, point out errors/mistakes, and output STRICT JSON for
 }}
 """
 
-                    with st.status("🧠 Evaluating Solution against Rubric & Vector Context...", expanded=True):
+                    with st.status("🧠 Evaluating Solution against Rubric & Vector Context...", expanded=True) as sbox:
                         try:
-                            res = client.chat.completions.create(
-                                model=selected_model_slug,
-                                messages=[
-                                    MATH_SYSTEM_PROMPT,
-                                    {"role": "user", "content": prompt_text},
-                                ],
+                            response_text, used_model = execute_completion_with_fallback(
+                                client,
+                                [MATH_SYSTEM_PROMPT, {"role": "user", "content": prompt_text}],
+                                selected_model_slug,
+                                status_box=sbox
                             )
-                            raw_json = clean_json_response(res.choices[0].message.content)
+                            raw_json = clean_json_response(response_text)
                             eval_data = json.loads(raw_json)
 
                             st.metric("Evaluation Score", eval_data["score"])
@@ -1130,6 +1135,7 @@ Provide detailed feedback, point out errors/mistakes, and output STRICT JSON for
                                 "accuracy": eval_data["score"],
                             })
                             save_data(st.session_state.db)
+                            sbox.update(label=f"✅ Evaluation Complete via `{used_model}`", state="complete")
                         except Exception as we:
                             st.error(f"Evaluation Error: {str(we)}")
 
@@ -1170,7 +1176,7 @@ elif st.session_state.active_mode == "mock_viva":
         viva_model_label = st.selectbox(
             "Interviewer Model",
             options=list(MODEL_OPTIONS.keys()),
-            index=2,
+            index=0,
             key="viva_model_select",
         )
         viva_model_slug = MODEL_OPTIONS[viva_model_label]
@@ -1206,7 +1212,7 @@ elif st.session_state.active_mode == "mock_viva":
                 st.markdown(candidate_reply)
 
             with st.chat_message("assistant"):
-                with st.status("🧠 Viva Chairman is evaluating response...", expanded=True):
+                with st.status("🧠 Viva Chairman is evaluating response...", expanded=True) as sbox:
                     viva_prompt = f"""You are a strict, formal Viva Board Examiner for: {viva_role}.
 Evaluate the candidate's last answer, point out conciseness, factual accuracy, or tone flaws, give a quick mark out of 10, and ask the NEXT follow-up question.
 
@@ -1215,13 +1221,15 @@ Maintain strict board atmosphere."""
                     messages_payload = [{"role": "system", "content": viva_prompt}] + st.session_state.viva_messages[-6:]
 
                     try:
-                        res = client.chat.completions.create(
-                            model=viva_model_slug,
-                            messages=messages_payload,
+                        reply_content, used_model = execute_completion_with_fallback(
+                            client,
+                            messages_payload,
+                            viva_model_slug,
+                            status_box=sbox
                         )
-                        reply_content = res.choices[0].message.content
                         st.markdown(fix_latex_formatting(reply_content))
                         st.session_state.viva_messages.append({"role": "assistant", "content": reply_content})
+                        sbox.update(label=f"✅ Response evaluated via `{used_model}`", state="complete")
                     except Exception as ve:
                         st.error(f"Viva Error: {str(ve)}")
 
@@ -1235,7 +1243,6 @@ elif st.session_state.active_mode == "analytics_dash":
 
     history_records = st.session_state.db.get("analytics", [])
 
-    # Calculate overall stats
     total_exams = len(history_records)
     total_mistakes = sum(
         len(sub.get("mistakes", [])) for sub in st.session_state.db["mcq_subjects"].values()
