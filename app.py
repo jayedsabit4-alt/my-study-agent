@@ -34,7 +34,7 @@ MATH_SYSTEM_PROMPT = {
 }
 
 
-# --- FIXED LATEX REGEX CLEANER ---
+# --- LATEX REGEX CLEANER ---
 def fix_latex_formatting(text: str) -> str:
     """Cleans up raw LLM bracket outputs and converts them to standard KaTeX delimiters."""
     if not text:
@@ -273,7 +273,6 @@ if st.session_state.active_mode == "general_chat":
         st.session_state.active_chat, []
     )
 
-    # 1. Display Chat History
     for msg in chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(fix_latex_formatting(msg["content"]))
@@ -283,7 +282,6 @@ if st.session_state.active_mode == "general_chat":
 
     st.markdown("---")
 
-    # 2. Bottom Controls Area (Model Selector & File Attachment placed together right above Chat Input)
     col_ctrl1, col_ctrl2 = st.columns([1, 1])
     with col_ctrl1:
         selected_label = st.selectbox(
@@ -353,7 +351,7 @@ if st.session_state.active_mode == "general_chat":
                         cleaned_final = fix_latex_formatting(full_response)
                         if not cleaned_final.strip():
                             cleaned_final = "*(Model returned empty response. Please try another model.)*"
-                        
+
                         response_placeholder.markdown(cleaned_final)
                         status.update(label="✅ Response Done!", state="complete")
 
@@ -392,7 +390,6 @@ elif st.session_state.active_mode == "notebook_studio":
     # WORKSPACE 1: MCQ WORKSPACE
     # --------------------------------------------------------------------------
     if workspace_type == "📝 MCQ Workspace":
-        # --- LOCAL MCQ TIMER ---
         with st.expander("⏱️ MCQ Practice Exam Timer", expanded=False):
             col_mcq_t1, col_mcq_t2 = st.columns([2, 1])
             mcq_mins = col_mcq_t1.number_input("Set Timer (Minutes)", min_value=1, max_value=180, value=15, step=5, key="mcq_timer_input")
@@ -410,14 +407,14 @@ elif st.session_state.active_mode == "notebook_studio":
 
         st.divider()
 
-        col_s1, col_s2 = st.columns([3, 1])
+        col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
         mcq_subs = list(st.session_state.db["mcq_subjects"].keys())
         selected_mcq_sub = col_s1.selectbox(
             "Select Subject", mcq_subs if mcq_subs else ["None"]
         )
 
-        new_mcq_sub = col_s2.text_input("New Subject")
-        if col_s2.button("Add Subject") and new_mcq_sub:
+        new_mcq_sub = col_s2.text_input("New MCQ Subject")
+        if col_s2.button("Add Subject", key="btn_add_mcq_sub") and new_mcq_sub:
             st.session_state.db["mcq_subjects"][new_mcq_sub] = {
                 "sources": [],
                 "chat": [],
@@ -427,7 +424,14 @@ elif st.session_state.active_mode == "notebook_studio":
             save_data(st.session_state.db)
             st.rerun()
 
+        # Added Delete Subject functionality
         if selected_mcq_sub and selected_mcq_sub != "None":
+            if col_s3.button("🗑️ Delete Subject", key="btn_del_mcq_sub"):
+                del st.session_state.db["mcq_subjects"][selected_mcq_sub]
+                save_data(st.session_state.db)
+                st.success(f"Deleted subject '{selected_mcq_sub}'!")
+                st.rerun()
+
             sub_data = st.session_state.db["mcq_subjects"][selected_mcq_sub]
             m_tab1, m_tab2 = st.tabs(["🎯 Quiz Generator & Practice", "📖 Mistakes Register & Notes"])
 
@@ -583,7 +587,6 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
     # WORKSPACE 2: FOCUS WRITTEN WORKSPACE
     # --------------------------------------------------------------------------
     elif workspace_type == "✍️ Focus Written Workspace":
-        # --- LOCAL WRITTEN TIMER ---
         with st.expander("⏱️ Written Exam Timer", expanded=False):
             col_w_t1, col_w_t2 = st.columns([2, 1])
             written_mins = col_w_t1.number_input("Set Timer (Minutes)", min_value=1, max_value=180, value=30, step=5, key="written_timer_input")
@@ -601,14 +604,14 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
 
         st.divider()
 
-        col_w1, col_w2 = st.columns([3, 1])
+        col_w1, col_w2, col_w3 = st.columns([2, 1, 1])
         w_subs = list(st.session_state.db["written_subjects"].keys())
         selected_w_sub = col_w1.selectbox(
             "Select Subject", w_subs if w_subs else ["None"]
         )
 
-        new_w_sub = col_w2.text_input("New Subject ")
-        if col_w2.button("Add Subject") and new_w_sub:
+        new_w_sub = col_w2.text_input("New Written Subject")
+        if col_w2.button("Add Subject", key="btn_add_w_sub") and new_w_sub:
             st.session_state.db["written_subjects"][new_w_sub] = {
                 "sources": [],
                 "chat": [],
@@ -618,7 +621,14 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
             save_data(st.session_state.db)
             st.rerun()
 
+        # Added Delete Subject functionality for Written Workspace
         if selected_w_sub and selected_w_sub != "None":
+            if col_w3.button("🗑️ Delete Subject", key="btn_del_w_sub"):
+                del st.session_state.db["written_subjects"][selected_w_sub]
+                save_data(st.session_state.db)
+                st.success(f"Deleted subject '{selected_w_sub}'!")
+                st.rerun()
+
             w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
 
             col_lang1, col_lang2 = st.columns([1, 2])
