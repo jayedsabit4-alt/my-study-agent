@@ -51,7 +51,7 @@ def fix_latex_formatting(text: str) -> str:
     return text
 
 
-# --- SAFE JSON RESPONSE CLEANER (Prevents SyntaxError) ---
+# --- SAFE JSON RESPONSE CLEANER ---
 def clean_json_response(content: str) -> str:
     """Safely extracts raw JSON arrays or objects from markdown responses."""
     if not content:
@@ -269,18 +269,11 @@ with st.sidebar:
 if st.session_state.active_mode == "general_chat":
     st.title(f"💬 {st.session_state.active_chat}")
 
-    selected_label = st.selectbox(
-        "🌐 AI Model Architecture",
-        options=list(MODEL_OPTIONS.keys()),
-        index=0,
-        key="chat_model_select",
-    )
-    selected_model_slug = MODEL_OPTIONS[selected_label]
-
     chat_history = st.session_state.db["chats"].get(
         st.session_state.active_chat, []
     )
 
+    # 1. Display Chat History
     for msg in chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(fix_latex_formatting(msg["content"]))
@@ -288,11 +281,25 @@ if st.session_state.active_mode == "general_chat":
                 with st.expander("📋 Copy Raw Text"):
                     st.code(msg["content"], language="markdown")
 
-    attached_file = st.file_uploader(
-        "Attach Context Material (PDF, DOCX, CSV, Image)",
-        type=["png", "jpg", "jpeg", "pdf", "docx", "csv", "xlsx"],
-        key="gen_chat_file",
-    )
+    st.markdown("---")
+
+    # 2. Bottom Controls Area (Model Selector & File Attachment placed together right above Chat Input)
+    col_ctrl1, col_ctrl2 = st.columns([1, 1])
+    with col_ctrl1:
+        selected_label = st.selectbox(
+            "🌐 AI Model Architecture",
+            options=list(MODEL_OPTIONS.keys()),
+            index=0,
+            key="chat_model_select",
+        )
+        selected_model_slug = MODEL_OPTIONS[selected_label]
+
+    with col_ctrl2:
+        attached_file = st.file_uploader(
+            "Attach Context Material (PDF, DOCX, CSV, Image)",
+            type=["png", "jpg", "jpeg", "pdf", "docx", "csv", "xlsx"],
+            key="gen_chat_file",
+        )
 
     user_query = st.chat_input("Ask anything, request a math derivation, or submit a problem...")
 
@@ -333,11 +340,20 @@ if st.session_state.active_mode == "general_chat":
                         )
 
                         for chunk in response:
-                            if chunk.choices and chunk.choices[0].delta.content:
-                                full_response += chunk.choices[0].delta.content
-                                response_placeholder.markdown(fix_latex_formatting(full_response) + " ▌")
+                            if hasattr(chunk, "choices") and chunk.choices:
+                                choice = chunk.choices[0]
+                                if hasattr(choice, "delta") and choice.delta:
+                                    content = getattr(choice.delta, "content", None)
+                                    if content:
+                                        full_response += content
+                                        response_placeholder.markdown(
+                                            fix_latex_formatting(full_response) + " ▌"
+                                        )
 
                         cleaned_final = fix_latex_formatting(full_response)
+                        if not cleaned_final.strip():
+                            cleaned_final = "*(Model returned empty response. Please try another model.)*"
+                        
                         response_placeholder.markdown(cleaned_final)
                         status.update(label="✅ Response Done!", state="complete")
 
