@@ -39,21 +39,27 @@ def fix_latex_formatting(text: str) -> str:
     """Cleans up raw LLM bracket outputs and converts them to standard KaTeX delimiters."""
     if not text:
         return ""
-    # Convert \[ ... \] to $$ ... $$
     text = re.sub(r"\\\[(.*?)\\\]", r"$$\1$$", text, flags=re.DOTALL)
-    # Convert [ \command ... ] to $$ \command ... $$
     text = re.sub(r"(?<!\w)\[\s*(\\.*?)\s*\]", r"$$\1$$", text, flags=re.DOTALL)
-    # Convert \( ... \) to $ ... $
     text = re.sub(r"\\\((.*?)\\\)", r"$\1$", text, flags=re.DOTALL)
-    # Convert ( \command ... ) to $ \command ... $
     text = re.sub(r"(?<!\w)\(\s*(\\.*?)\s*\)", r"$\1$", text, flags=re.DOTALL)
-    # Handle standalone formula lines starting with LaTeX commands
     text = re.sub(
         r"(?m)^\\(frac|sqrt|left|mathrm|mathbf|begin|end|boldsymbol)\{.*\}$",
         r"$$\g<0>$$",
         text,
     )
     return text
+
+
+# --- SAFE JSON RESPONSE CLEANER (Prevents SyntaxError) ---
+def clean_json_response(content: str) -> str:
+    """Safely extracts raw JSON arrays or objects from markdown responses."""
+    if not content:
+        return ""
+    cleaned = re.sub(r"^```(?:json)?", "", content.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"```$", "", cleaned.strip(), flags=re.MULTILINE)
+    match = re.search(r"([\[\{].*[\]\}])", cleaned, re.DOTALL)
+    return match.group(1) if match else cleaned.strip()
 
 
 # --- LAZY CLIENT INITIALIZATION ---
@@ -481,7 +487,220 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                                         {"role": "user", "content": prompt},
                                     ],
                                 )
-                                raw_text = (
-                                    res.choices[0]
-                                    .message.content.replace("```json", "")
-                                    .replace("
+                                raw_json = clean_json_response(res.choices[0].message.content)
+                                st.session_state.quiz = json.loads(raw_json)
+                            except Exception as qe:
+                                st.error(f"Quiz Generation Error: {str(qe)}")
+
+                if "quiz" in st.session_state:
+                    st.divider()
+                    user_ans = {}
+                    with st.form("mcq_form"):
+                        for q in st.session_state.quiz:
+                            st.write(f"**Q{q['id']}: {fix_latex_formatting(q['question'])}**")
+                            user_ans[q["id"]] = st.radio(
+                                f"Select Option for Q{q['id']}", q["options"], key=f"q_{q['id']}"
+                            )
+                            st.markdown("---")
+                        submit_m = st.form_submit_button("Submit Quiz Answers")
+
+                    if submit_m:
+                        score = 0
+                        existing_concepts = [
+                            m["concept"] for m in sub_data.get("mistakes", [])
+                        ]
+
+                        for q in st.session_state.quiz:
+                            if user_ans[q["id"]] == q["correct"]:
+                                score += 1
+                                st.success(f"Q{q['id']} Correct! 🎉")
+                            else:
+                                st.error(f"Q{q['id']} Incorrect. Correct: {q['correct']}")
+                                st.info(f"💡 Explanation: {fix_latex_formatting(q['explanation'])}")
+
+                                if q["question"] not in existing_concepts:
+                                    sub_data["mistakes"].append({
+                                        "date": datetime.now().strftime("%Y-%m-%d"),
+                                        "concept": q["question"],
+                                        "takeaway": q["explanation"],
+                                    })
+                                else:
+                                    for ex_m in sub_data["mistakes"]:
+                                        if ex_m["concept"] == q["question"]:
+                                            ex_m["date"] = datetime.now().strftime("%Y-%m-%d")
+
+                        st.metric("Final Quiz Score", f"{score} / {len(st.session_state.quiz)}")
+                        save_data(st.session_state.db)
+
+            with m_tab2:
+                st.subheader(f"Logged Mistakes & Revision Notes ({selected_mcq_sub})")
+
+                with st.expander("➕ Manually Log Weak Spot / Concept"):
+                    manual_concept = st.text_input("Concept / Question")
+                    manual_takeaway = st.text_area("Correct Explanation / Key Takeaway")
+                    if st.button("Save Weak Spot"):
+                        if manual_concept:
+                            sub_data["mistakes"].append({
+                                "date": datetime.now().strftime("%Y-%m-%d"),
+                                "concept": manual_concept,
+                                "takeaway": manual_takeaway
+                            })
+                            save_data(st.session_state.db)
+                            st.success("Logged into revision register!")
+                            st.rerun()
+
+                st.markdown("---")
+                for idx, m in enumerate(sub_data.get("mistakes", [])):
+                    with st.expander(f"#{idx+1} [{m.get('date', 'N/A')}] {m['concept'][:60]}..."):
+                        st.markdown(f"**Question / Concept:**\n{fix_latex_formatting(m['concept'])}")
+                        st.markdown(f"**Explanation / Revision Takeaway:**\n{fix_latex_formatting(m['takeaway'])}")
+
+                st.divider()
+                if st.button("Export MCQ Revision Guide (.docx)"):
+                    fpath = generate_docx(
+                        selected_mcq_sub, sub_data["mistakes"], "MCQ"
+                    )
+                    with open(fpath, "rb") as fp:
+                        st.download_button("📥 Download Word Revision Guide", fp, file_name=fpath)
+
+    # --------------------------------------------------------------------------
+    # WORKSPACE 2: FOCUS WRITTEN WORKSPACE
+    # --------------------------------------------------------------------------
+    elif workspace_type == "✍️ Focus Written Workspace":
+        # --- LOCAL WRITTEN TIMER ---
+        with st.expander("⏱️ Written Exam Timer", expanded=False):
+            col_w_t1, col_w_t2 = st.columns([2, 1])
+            written_mins = col_w_t1.number_input("Set Timer (Minutes)", min_value=1, max_value=180, value=30, step=5, key="written_timer_input")
+            if col_w_t2.button("🚀 Start / Reset Timer", key="btn_written_timer"):
+                st.session_state.written_timer_end = datetime.now().timestamp() + (written_mins * 60)
+                st.success(f"Timer set for {written_mins} minutes!")
+
+            if "written_timer_end" in st.session_state:
+                remaining_sec = int(st.session_state.written_timer_end - datetime.now().timestamp())
+                if remaining_sec > 0:
+                    mins, secs = divmod(remaining_sec, 60)
+                    st.info(f"⏳ **Time Remaining**: {mins:02d}m {secs:02d}s")
+                else:
+                    st.error("⏰ **Time is up! Submit your answer now.**")
+
+        st.divider()
+
+        col_w1, col_w2 = st.columns([3, 1])
+        w_subs = list(st.session_state.db["written_subjects"].keys())
+        selected_w_sub = col_w1.selectbox(
+            "Select Subject", w_subs if w_subs else ["None"]
+        )
+
+        new_w_sub = col_w2.text_input("New Subject ")
+        if col_w2.button("Add Subject") and new_w_sub:
+            st.session_state.db["written_subjects"][new_w_sub] = {
+                "sources": [],
+                "chat": [],
+                "mistakes": [],
+                "instructions": "Focus on clarity, analytical depth, and structural coherence.",
+            }
+            save_data(st.session_state.db)
+            st.rerun()
+
+        if selected_w_sub and selected_w_sub != "None":
+            w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
+
+            col_lang1, col_lang2 = st.columns([1, 2])
+            lang_w_choice = col_lang1.selectbox("Evaluation Language", ["English", "Bangla (বাংলা)", "Bilingual (English + Bangla)"])
+
+            custom_instructions = st.text_area(
+                "Evaluation Rubric / Specific Criteria Instructions",
+                value=w_sub_data.get("instructions", "Focus on clarity, analytical depth, logic, and formula accuracy."),
+                height=90,
+            )
+            if st.button("💾 Save Rubric Criteria"):
+                w_sub_data["instructions"] = custom_instructions
+                save_data(st.session_state.db)
+                st.success("Rubric criteria saved!")
+
+            written_file = st.file_uploader(
+                "Attach Context Material (PDF, DOCX, Images, Notes)",
+                type=["pdf", "docx", "png", "jpg", "jpeg"],
+                key="written_file_up",
+            )
+            essay_input = st.text_area("Write or Paste Solution / Essay Submission", height=220)
+
+            if st.button("🔍 Evaluate Submission"):
+                if not st.session_state.get("saved_openrouter_key"):
+                    st.error("Please enter your API Key in the sidebar.")
+                elif not essay_input.strip():
+                    st.warning("Please enter your written solution or essay before running evaluation.")
+                else:
+                    client = get_openrouter_client(st.session_state.saved_openrouter_key)
+                    file_text = (
+                        process_uploaded_file(written_file) if written_file else ""
+                    )
+                    prior_mistakes = [
+                        f"- {m.get('area', '')}: {m.get('correction', '')}"
+                        for m in w_sub_data.get("mistakes", [])
+                    ]
+                    weakness_context = (
+                        "\n".join(prior_mistakes) if prior_mistakes else "None recorded yet."
+                    )
+
+                    combined_text = (
+                        f"Student Submission:\n{essay_input}\n\nAttached Material:\n{file_text}"
+                    )
+
+                    prompt = f"""Language Requirement: {lang_w_choice}
+Subject: {selected_w_sub}
+Evaluation Criteria: {custom_instructions}
+
+PAST LOGGED MISTAKES FOR THIS STUDENT:
+{weakness_context}
+
+SUBMISSION & CONTENT TO EVALUATE:
+{combined_text}
+
+Provide detailed feedback, point out errors/mistakes, and output STRICT JSON format:
+{{
+  "score": "85%",
+  "weakness": "Key area needing improvement...",
+  "strategy": "Actionable takeaway to fix mistake..."
+}}
+"""
+
+                    with st.status("🧠 Evaluating Written Solution...", expanded=True):
+                        try:
+                            res = client.chat.completions.create(
+                                model=selected_model_slug,
+                                messages=[
+                                    MATH_SYSTEM_PROMPT,
+                                    {"role": "user", "content": prompt},
+                                ],
+                            )
+                            raw_json = clean_json_response(res.choices[0].message.content)
+                            eval_data = json.loads(raw_json)
+
+                            st.metric("Evaluation Score", eval_data["score"])
+                            st.info(f"**Identified Weakness / Mistake**: {fix_latex_formatting(eval_data['weakness'])}")
+                            st.success(f"**Improvement Strategy**: {fix_latex_formatting(eval_data['strategy'])}")
+
+                            w_sub_data["mistakes"].append({
+                                "date": datetime.now().strftime("%Y-%m-%d"),
+                                "area": eval_data["weakness"],
+                                "correction": eval_data["strategy"],
+                            })
+                            save_data(st.session_state.db)
+                        except Exception as we:
+                            st.error(f"Evaluation Error: {str(we)}")
+
+            st.divider()
+            st.subheader(f"Logged Written Feedback Register ({selected_w_sub})")
+            for idx, item in enumerate(w_sub_data.get("mistakes", [])):
+                with st.expander(f"#{idx+1} [{item.get('date', 'N/A')}] {item.get('area', 'Feedback')[:60]}..."):
+                    st.markdown(f"**Weakness Area:**\n{fix_latex_formatting(item.get('area', ''))}")
+                    st.markdown(f"**Correction Strategy:**\n{fix_latex_formatting(item.get('correction', ''))}")
+
+            st.divider()
+            if st.button("Export Written Revision Guide (.docx)"):
+                fpath = generate_docx(
+                    selected_w_sub, w_sub_data["mistakes"], "Written"
+                )
+                with open(fpath, "rb") as fp:
+                    st.download_button("📥 Download Revision Guide", fp, file_name=fpath)
