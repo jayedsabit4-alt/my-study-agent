@@ -9,6 +9,60 @@ import pandas as pd
 from PIL import Image
 import streamlit as st
 
+
+import streamlit as st
+
+# 1. Set mobile-friendly layout configuration
+st.set_page_config(
+    page_title="AI Study Notebook",
+    page_icon="🎓",
+    layout="centered",  # Keeps content stacked neatly in a single mobile column
+    initial_sidebar_state="collapsed",  # Automatically hides sidebar on mobile screens
+)
+
+# 2. Inject CSS to remove blank margins and create a clean Gemini-like UI
+st.markdown(
+    """
+    <style>
+    /* Remove unnecessary top and side padding */
+    .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 3rem !important;
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+        max-width: 100% !important;
+    }
+    
+    /* Hide default Streamlit headers and footers */
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    #MainMenu {visibility: hidden;}
+
+    /* Make input boxes and text areas clean and rounded like Gemini */
+    .stTextInput > div > div > input, .stTextArea textarea {
+        border-radius: 18px !important;
+        border: 1px solid #d1d5db !important;
+        padding: 10px 15px !important;
+    }
+
+    /* Style buttons for mobile touch targets */
+    .stButton > button {
+        border-radius: 20px !important;
+        width: 100% !important;
+        height: 48px !important;
+        font-weight: 600 !important;
+    }
+
+    /* Prevent wide tables or code blocks from overflowing the screen */
+    .stTable, div[data-testid="stTable"] {
+        overflow-x: auto !important;
+        display: block !important;
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
+)
+
 # Optional sklearn dependency for local RAG vector similarity
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
