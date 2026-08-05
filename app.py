@@ -13,13 +13,13 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
-# --- OPENROUTER FREE MODELS ---
-MODEL_GENERAL = "meta-llama/llama-3.3-70b-instruct:free"
-MODEL_REASONING = "deepseek/deepseek-r1:free"
-MODEL_STRUCTURED = "qwen/qwen-2.5-72b-instruct:free"
+# --- GUARANTEED FREE OPENROUTER MODELS ---
+MODEL_AUTO = "openrouter/free"  # Dynamic router (Always active)
+MODEL_REASONING = "nvidia/nemotron-3-ultra-550b-a55b:free"  # Heavy reasoning
+MODEL_GENERAL = "google/gemma-4-31b-it:free"  # General academic
+MODEL_STRUCTURED = "openai/gpt-oss-20b:free"  # Fast structured output
 
-FREE_MODELS = [MODEL_GENERAL, MODEL_REASONING, MODEL_STRUCTURED]
-
+FREE_MODELS = [MODEL_AUTO, MODEL_REASONING, MODEL_GENERAL, MODEL_STRUCTURED]
 
 # --- PERSISTENCE HELPERS ---
 def load_data():
