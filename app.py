@@ -20,11 +20,11 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# 2. Custom CSS: Fixes Math LaTeX, Keeps Sidebar Buttons Inline, Locks Viewport
+# 2. Custom CSS: Gemini Mobile Drawer & Exact Layout Fit
 st.markdown(
     """
     <style>
-    /* 1. LOCK VIEWPORT & PREVENT WOBBLE */
+    /* 1. VIEWPORT & MAIN CANVAS LOCK (Anti-Wobble) */
     html, body, [data-testid="stAppViewContainer"], .main {
         overflow-x: hidden !important;
         max-width: 100vw !important;
@@ -38,7 +38,90 @@ st.markdown(
         max-width: 100% !important;
     }
 
-    /* 2. FIX LATEX FORMULAS (Prevents vertical character stacking) */
+    /* 2. GEMINI MOBILE SIDEBAR DRAWER (85% Viewport Width) */
+    @media (max-width: 768px) {
+        [data-testid="stSidebar"] {
+            width: 85vw !important;
+            min-width: 85vw !important;
+            max-width: 85vw !important;
+            background-color: #131314 !important;
+            box-shadow: 4px 0px 20px rgba(0, 0, 0, 0.6) !important;
+        }
+
+        [data-testid="stSidebarUserContent"] {
+            padding: 1rem 0.5rem !important;
+            width: 100% !important;
+            overflow-x: hidden !important;
+            box-sizing: border-box !important;
+        }
+    }
+
+    /* 3. STRICT CONTAINMENT INSIDE SIDEBAR (Prevents Right-Side Overflow) */
+    [data-testid="stSidebar"] * {
+        box-sizing: border-box !important;
+        max-width: 100% !important;
+    }
+
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
+        display: flex !important;
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        width: 100% !important;
+        gap: 4px !important;
+        margin-bottom: 4px !important;
+    }
+
+    /* Thread Title Column */
+    [data-testid="stSidebar"] [data-testid="column"]:first-child {
+        width: 80% !important;
+        min-width: 0 !important;
+        flex: 1 1 80% !important;
+    }
+
+    /* Delete Button Column */
+    [data-testid="stSidebar"] [data-testid="column"]:last-child {
+        width: 38px !important;
+        min-width: 38px !important;
+        flex: 0 0 38px !important;
+    }
+
+    /* 4. GEMINI-STYLE PILL BUTTONS FOR THREADS */
+    [data-testid="stSidebar"] .stButton > button {
+        border-radius: 20px !important;
+        background-color: #1e1f20 !important;
+        border: 1px solid #2e2f31 !important;
+        color: #e3e3e3 !important;
+        text-align: left !important;
+        padding: 6px 12px !important;
+        height: 40px !important;
+        width: 100% !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        font-size: 13.5px !important;
+    }
+
+    [data-testid="stSidebar"] .stButton > button:hover {
+        background-color: #2a2b2e !important;
+        border-color: #444746 !important;
+    }
+
+    /* Trash Icon Alignment */
+    [data-testid="stSidebar"] [data-testid="column"]:last-child .stButton > button {
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 50% !important;
+        height: 36px !important;
+        width: 36px !important;
+        background-color: transparent !important;
+        border: none !important;
+    }
+
+    /* 5. LATEX FORMULA RENDERING PRESERVATION */
     .katex, .katex *, .katex-display, .katex-display *, .MathJax, .MathJax * {
         white-space: nowrap !important;
         word-break: normal !important;
@@ -53,37 +136,7 @@ st.markdown(
         margin: 0.5em 0 !important;
     }
 
-    /* 3. FIX SIDEBAR THREADS (Forces Thread Name + Delete Button onto 1 Line) */
-    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
-        flex-direction: row !important;
-        flex-wrap: nowrap !important;
-        align-items: center !important;
-        gap: 0.25rem !important;
-    }
-
-    [data-testid="stSidebar"] [data-testid="column"] {
-        width: auto !important;
-        min-width: 0 !important;
-    }
-
-    [data-testid="stSidebar"] [data-testid="column"]:first-child {
-        flex: 1 1 80% !important;
-    }
-
-    [data-testid="stSidebar"] [data-testid="column"]:last-child {
-        flex: 0 0 20% !important;
-    }
-
-    [data-testid="stSidebar"] .stButton > button {
-        padding: 0.25rem 0.5rem !important;
-        height: 38px !important;
-        font-size: 14px !important;
-        white-space: nowrap !important;
-        text-overflow: ellipsis !important;
-        overflow: hidden !important;
-    }
-
-    /* 4. SAFE TEXT WRAPPING FOR REGULAR PROSE ONLY */
+    /* 6. PROSE TEXT WRAPPING */
     p, li, h1, h2, h3, h4 {
         white-space: pre-wrap !important;
         word-break: break-word !important;
