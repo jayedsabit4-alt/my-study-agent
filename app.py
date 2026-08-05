@@ -28,53 +28,51 @@ MODEL_OPTIONS = {
 MATH_SYSTEM_PROMPT = {
     "role": "system",
     "content": (
-        "When rendering mathematical variables, formulas, or statistical notation, "
-        "ALWAYS wrap them in standard LaTeX dollar signs. Use single dollar signs "
-        "for inline math (e.g., $\\mu$, $\\bar{x}$, $\\theta$) and double dollar signs "
-        "for standalone equations ($$...$$).\n\n"
-        "FOR MULTI-LINE ALIGNED EQUATIONS, wrap the entire block in single outer double-dollar signs:\n"
-        "$$\\begin{aligned}\n"
-        "a &= b \\\\\n"
-        "c &= d\n"
-        "\\end{aligned}$$\n\n"
-        "NEVER place $$ directly around \\begin{aligned} or \\end{aligned}."
+        "You are an expert academic assistant. When rendering formatting and mathematical notation:\n"
+        "1. ALWAYS place markdown headers (e.g., ### Section) and horizontal rules (---) on separate lines with BLANK LINES before and after.\n"
+        "2. Put standalone display math equations inside double dollar signs on their OWN separate lines:\n"
+        "$$\n"
+        "f(x) = \\dots\n"
+        "$$\n"
+        "3. Wrap inline math variables/symbols in single dollar signs (e.g., $x = 5$).\n"
+        "4. NEVER output orphan structural tags like \\end{cases} without a matching \\begin{cases}.\n"
+        "5. NEVER stream section headers and LaTeX equations together on a single continuous line."
     ),
 }
 
 
-# --- LATEX REGEX CLEANER ---
+# --- ADVANCED LATEX & MARKDOWN FORMAT SANITIZER ---
 def fix_latex_formatting(text: str) -> str:
-    """Cleans up raw LLM bracket outputs and fixes nested block delimiters for KaTeX."""
+    """Cleans raw LLM outputs, separates squished headers, and fixes KaTeX rendering bugs."""
     if not text:
         return ""
 
-    # 1. Convert bracket notation [ ... ] and \( ... \) to $ / $$
-    text = re.sub(r"\\\[\s*(.*?)\s*\\\]", r"$$\1$$", text, flags=re.DOTALL)
-    text = re.sub(r"(?<!\w)\[\s*(\\.*?)\s*\]", r"$$\1$$", text, flags=re.DOTALL)
+    # 1. Force newline spacing around markdown headers and horizontal rules stuck in text
+    text = re.sub(r"(?<!\n)(###?\s+)", r"\n\n\1", text)
+    text = re.sub(r"(?<!\n)(---\s*)", r"\n\n\1", text)
+    text = re.sub(r"(\\end\{[a-zA-Z]+\})\s*(###?|---)", r"\1\n\n\2", text)
+
+    # 2. Convert raw bracket notations [ ... ] and \( ... \) to standard dollar signs
+    text = re.sub(r"\\\[\s*(.*?)\s*\\\]", r"\n$$\1$$\n", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!\w)\[\s*(\\.*?)\s*\]", r"\n$$\1$$\n", text, flags=re.DOTALL)
     text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\w)\(\s*(\\.*?)\s*\)", r"$\1$", text, flags=re.DOTALL)
 
-    # 2. Fix broken/nested $$ tags around environments
+    # 3. Fix nested or double $$ tags around alignment environments
     text = re.sub(
-        r"\$\$\s*(\\begin\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
-        r"$$\1",
+        r"\$\$\s*(\\begin\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})",
+        r"\n$$\n\1",
         text,
     )
     text = re.sub(
-        r"\$\$\s*(\\end\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
-        r"\1$$",
+        r"(\\end\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
+        r"\1\n$$\n",
         text,
     )
-    text = re.sub(
-        r"(\\begin\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})\s*\$\$",
-        r"\1",
-        text,
-    )
-    text = re.sub(
-        r"\$\$\s*(\\end\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})",
-        r"\1",
-        text,
-    )
+
+    # 4. Clean orphan \end{cases} tags missing their starting \begin{cases}
+    if "\\end{cases}" in text and "\\begin{cases}" not in text:
+        text = text.replace("\\end{cases}", "")
 
     return text
 
@@ -95,7 +93,7 @@ def get_openrouter_client(api_key):
     from openai import OpenAI
 
     return OpenAI(
-        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=30.0
+        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=45.0
     )
 
 
@@ -160,9 +158,9 @@ if "active_chat" not in st.session_state:
     )
 
 
-# --- IMAGE COMPRESSION HELPER ---
-def compress_image_to_b64(image_bytes, max_dim=1200, quality=80):
-    """Resizes and compresses images to JPEG before base64 encoding for fast API delivery."""
+# --- FAST IMAGE COMPRESSION HELPER ---
+def compress_image_to_b64(image_bytes, max_dim=1000, quality=75):
+    """Resizes and compresses images to JPEG before base64 encoding to keep uploads under 200KB."""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode in ("RGBA", "P"):
@@ -177,67 +175,64 @@ def compress_image_to_b64(image_bytes, max_dim=1200, quality=80):
         return f"data:image/jpeg;base64,{b64_str}"
 
 
-# --- MULTIMODAL & VISION OCR FILE PROCESSOR ---
-def process_uploaded_file(uploaded_file):
-    """Processes text/documents and converts image files/scans into lightweight base64 URLs."""
-    if uploaded_file is None:
+# --- MULTI-FILE OPTIMIZED PROCESSOR ---
+def process_uploaded_files(uploaded_files):
+    """Processes multiple files simultaneously with chunking and fast image compression."""
+    if not uploaded_files:
         return "", []
 
-    file_type = uploaded_file.name.split(".")[-1].lower()
-    extracted_text = f"\n--- Attached File: {uploaded_file.name} ---\n"
+    extracted_text = ""
     image_urls = []
 
-    try:
-        if file_type in ["png", "jpg", "jpeg"]:
-            compressed_url = compress_image_to_b64(uploaded_file.getvalue())
-            image_urls.append(compressed_url)
-            extracted_text += f"[Handwritten/Image Document Attached: {uploaded_file.name}]"
+    for uploaded_file in uploaded_files:
+        file_type = uploaded_file.name.split(".")[-1].lower()
+        extracted_text += f"\n\n--- Attached File: {uploaded_file.name} ---\n"
 
-        elif file_type == "pdf":
-            from pypdf import PdfReader
+        try:
+            if file_type in ["png", "jpg", "jpeg"]:
+                if len(image_urls) < 3:
+                    compressed_url = compress_image_to_b64(uploaded_file.getvalue())
+                    image_urls.append(compressed_url)
+                extracted_text += f"[Image Attached: {uploaded_file.name}]"
 
-            reader = PdfReader(uploaded_file)
-            pdf_text = ""
-            for page_idx, page in enumerate(reader.pages):
-                txt = page.extract_text()
-                if txt:
-                    pdf_text += txt + "\n"
-                
-                # Convert embedded images from PDF pages (capped at first 2 images max for speed)
-                if len(image_urls) < 2:
-                    for img_obj in getattr(page, "images", []):
-                        try:
-                            compressed_url = compress_image_to_b64(img_obj.data)
-                            image_urls.append(compressed_url)
-                            if len(image_urls) >= 2:
-                                break
-                        except Exception:
-                            pass
+            elif file_type == "pdf":
+                from pypdf import PdfReader
 
-            if pdf_text.strip():
-                extracted_text += pdf_text
+                reader = PdfReader(uploaded_file)
+                pdf_text = []
+                # Fast extraction capped at max 40 pages per PDF to prevent thread lock
+                for page_idx, page in enumerate(reader.pages):
+                    if page_idx >= 40:
+                        pdf_text.append("\n[Truncated remaining pages for fast performance]")
+                        break
+                    txt = page.extract_text()
+                    if txt:
+                        pdf_text.append(txt)
+
+                if pdf_text:
+                    extracted_text += "\n".join(pdf_text)
+                else:
+                    extracted_text += "[Scanned/Handwritten PDF Document Context]"
+
+            elif file_type == "docx":
+                from docx import Document
+
+                doc = Document(uploaded_file)
+                extracted_text += "\n".join([p.text for p in doc.paragraphs])
+
+            elif file_type in ["csv", "xlsx"]:
+                df = (
+                    pd.read_csv(uploaded_file)
+                    if file_type == "csv"
+                    else pd.read_excel(uploaded_file)
+                )
+                extracted_text += df.head(100).to_string(index=False)
+
             else:
-                extracted_text += "[Scanned/Handwritten PDF Document - Transcribing via Vision OCR]"
+                extracted_text += uploaded_file.getvalue().decode("utf-8", errors="ignore")
 
-        elif file_type == "docx":
-            from docx import Document
-
-            doc = Document(uploaded_file)
-            extracted_text += "\n".join([p.text for p in doc.paragraphs])
-
-        elif file_type in ["csv", "xlsx"]:
-            df = (
-                pd.read_csv(uploaded_file)
-                if file_type == "csv"
-                else pd.read_excel(uploaded_file)
-            )
-            extracted_text += df.to_string(index=False)
-
-        else:
-            extracted_text += uploaded_file.getvalue().decode("utf-8")
-
-    except Exception as e:
-        extracted_text += f"Error reading file: {str(e)}"
+        except Exception as e:
+            extracted_text += f"Error processing {uploaded_file.name}: {str(e)}"
 
     return extracted_text, image_urls
 
@@ -370,10 +365,11 @@ if st.session_state.active_mode == "general_chat":
         selected_model_slug = MODEL_OPTIONS[selected_label]
 
     with col_ctrl2:
-        attached_file = st.file_uploader(
-            "Attach Context Material (PDF, DOCX, CSV, Image, Handwritten Notes)",
+        attached_files = st.file_uploader(
+            "Attach Context Sources (Multiple PDFs, DOCX, CSV, Images)",
             type=["png", "jpg", "jpeg", "pdf", "docx", "csv", "xlsx"],
-            key="gen_chat_file",
+            accept_multiple_files=True,
+            key="gen_chat_files",
         )
 
     user_query = st.chat_input("Ask anything, request a math derivation, or submit a problem...")
@@ -384,7 +380,7 @@ if st.session_state.active_mode == "general_chat":
         else:
             client = get_openrouter_client(st.session_state.saved_openrouter_key)
             file_text, image_urls = (
-                process_uploaded_file(attached_file) if attached_file else ("", [])
+                process_uploaded_files(attached_files) if attached_files else ("", [])
             )
             full_prompt = (
                 f"{user_query}\n{file_text}" if file_text else user_query
@@ -536,10 +532,11 @@ elif st.session_state.active_mode == "notebook_studio":
                     save_data(st.session_state.db)
                     st.success("Instructions saved!")
 
-                mcq_file = st.file_uploader(
-                    "Attach Study Material (PDF, DOCX, CSV, Images, Handwritten Notes)",
+                mcq_files = st.file_uploader(
+                    "Attach Study Materials (Multiple PDFs, DOCX, CSV, Images)",
                     type=["pdf", "docx", "csv", "xlsx", "png", "jpg", "jpeg"],
-                    key="mcq_file_up",
+                    accept_multiple_files=True,
+                    key="mcq_files_up",
                 )
 
                 if st.button("🚀 Generate Chapter Quiz"):
@@ -550,7 +547,7 @@ elif st.session_state.active_mode == "notebook_studio":
                             st.session_state.saved_openrouter_key
                         )
                         file_content, image_urls = (
-                            process_uploaded_file(mcq_file) if mcq_file else ("", [])
+                            process_uploaded_files(mcq_files) if mcq_files else ("", [])
                         )
                         prior_mistakes = [
                             f"- {m.get('concept', '')}: {m.get('takeaway', '')}"
@@ -576,7 +573,7 @@ ATTACHED SOURCE MATERIALS / NOTES:
 
 GENERATE A QUIZ FOLLOWING THESE RULES:
 1. Target the chapter concepts in source materials and past logged weaknesses.
-2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the handwritten text.
+2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the text.
 3. DO NOT repeat exact duplicate questions from past mistakes; create NEW variations or deeper questions testing those concepts.
 4. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math.
 5. Output STRICT raw JSON array format without markdown backticks:
@@ -737,22 +734,23 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                 save_data(st.session_state.db)
                 st.success("Rubric criteria saved!")
 
-            written_file = st.file_uploader(
-                "Attach Context Material (PDF, DOCX, Images, Handwritten Notes)",
+            written_files = st.file_uploader(
+                "Attach Context Materials (Multiple PDFs, DOCX, Images)",
                 type=["pdf", "docx", "png", "jpg", "jpeg"],
-                key="written_file_up",
+                accept_multiple_files=True,
+                key="written_files_up",
             )
             essay_input = st.text_area("Write or Paste Solution / Essay Submission", height=220)
 
             if st.button("🔍 Evaluate Submission"):
                 if not st.session_state.get("saved_openrouter_key"):
                     st.error("Please enter your API Key in the sidebar.")
-                elif not essay_input.strip() and not written_file:
-                    st.warning("Please enter a written solution or attach a handwritten/scanned file before evaluating.")
+                elif not essay_input.strip() and not written_files:
+                    st.warning("Please enter a written solution or attach source files before evaluating.")
                 else:
                     client = get_openrouter_client(st.session_state.saved_openrouter_key)
                     file_text, image_urls = (
-                        process_uploaded_file(written_file) if written_file else ("", [])
+                        process_uploaded_files(written_files) if written_files else ("", [])
                     )
                     prior_mistakes = [
                         f"- {m.get('area', '')}: {m.get('correction', '')}"
