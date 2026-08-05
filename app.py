@@ -14,22 +14,36 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
+# Expanded list of free models - none removed, more added for resilience
 MODEL_OPTIONS = {
-    "openrouter/free (Auto-Router - Highest Uptime)": "openrouter/free",
+    "google/gemma-4-31b-it:free (Vision & Document OCR)": (
+        "google/gemma-4-31b-it:free"
+    ),
+    "google/gemma-2-9b-it:free (Fast Multimodal)": "google/gemma-2-9b-it:free",
     "meta-llama/llama-3.3-70b-instruct:free (High Accuracy)": (
         "meta-llama/llama-3.3-70b-instruct:free"
     ),
-    "google/gemma-2-9b-it:free (Fast & Multimodal)": "google/gemma-2-9b-it:free",
+    "openrouter/free (Auto-Router - Highest Uptime)": "openrouter/free",
     "nvidia/nemotron-3-ultra-550b-a55b:free (Deep Reasoning)": (
         "nvidia/nemotron-3-ultra-550b-a55b:free"
     ),
+    "openai/gpt-oss-20b:free (Lightweight Chat)": "openai/gpt-oss-20b:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free (Math & Logic)": (
+        "qwen/qwen-2.5-coder-32b-instruct:free"
+    ),
+    "mistralai/mistral-7b-instruct:free (Fast Reasoning)": (
+        "mistralai/mistral-7b-instruct:free"
+    ),
 }
 
-# Fallback sequence if primary free model is rate-limited
+# Auto-fallback sequence when a free tier hits rate limits or goes down
 FALLBACK_MODELS = [
+    "google/gemma-4-31b-it:free",
     "openrouter/free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-2-9b-it:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "qwen/qwen-2.5-coder-32b-instruct:free",
 ]
 
 MATH_SYSTEM_PROMPT = {
@@ -202,6 +216,7 @@ def extract_file_data(uploaded_file):
         elif file_type == "pdf":
             pdf_text = []
             
+            # Primary Engine: pdfplumber for table parsing
             try:
                 import pdfplumber
                 with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
@@ -236,6 +251,7 @@ def extract_file_data(uploaded_file):
                             pdf_text.append(page_content)
 
             except Exception:
+                # Fallback Engine: pypdf
                 from pypdf import PdfReader
                 pdf_stream = io.BytesIO(uploaded_file.getvalue())
                 reader = PdfReader(pdf_stream, strict=False)
@@ -403,7 +419,7 @@ if st.session_state.active_mode == "general_chat":
                 with st.expander("📋 Copy Raw Text"):
                     st.code(msg["content"], language="markdown")
 
-    # --- REGENERATE BUTTON ---
+    # --- REGENERATE / RETRY BUTTON ---
     if chat_history and chat_history[-1]["role"] in ["user", "assistant"]:
         col_reg, _ = st.columns([2, 5])
         if col_reg.button("🔄 Regenerate / Retry Response", key="btn_regen_chat"):
@@ -480,7 +496,7 @@ if st.session_state.active_mode == "general_chat":
                 st.markdown(user_query)
 
             with st.chat_message("assistant"):
-                with st.status("🧠 AI is thinking...", expanded=True) as status:
+                with st.status("🧠 Processing request...", expanded=True) as status:
                     response_placeholder = st.empty()
                     full_response = ""
 
@@ -497,17 +513,18 @@ if st.session_state.active_mode == "general_chat":
                     else:
                         api_messages.append({"role": "user", "content": latest_prompt})
 
-                    # --- MULTI-MODEL FALLBACK CIRCUIT ---
+                    # Smart fallback candidate ordering: requested model first, followed by remaining free models
                     candidate_models = [selected_model_slug] + [
                         m for m in FALLBACK_MODELS if m != selected_model_slug
                     ]
                     
                     success = False
                     last_error = None
+                    rate_limit_encountered = False
 
                     for model_candidate in candidate_models:
                         try:
-                            status.write(f"📡 Connecting to model: `{model_candidate}`...")
+                            status.write(f"📡 Querying model: `{model_candidate}`...")
                             response = client.chat.completions.create(
                                 model=model_candidate, messages=api_messages, stream=True
                             )
@@ -526,7 +543,7 @@ if st.session_state.active_mode == "general_chat":
                             cleaned_final = fix_latex_formatting(full_response)
                             if cleaned_final.strip():
                                 response_placeholder.markdown(cleaned_final)
-                                status.update(label="✅ Response Complete!", state="complete")
+                                status.update(label=f"✅ Finished using `{model_candidate}`", state="complete")
                                 
                                 chat_history.append({"role": "assistant", "content": cleaned_final})
                                 st.session_state.db["chats"][st.session_state.active_chat] = chat_history
@@ -536,14 +553,31 @@ if st.session_state.active_mode == "general_chat":
 
                         except Exception as ex:
                             last_error = str(ex)
-                            status.write(f"⚠️ `{model_candidate}` unavailable ({last_error[:80]}...). Switching backup model...")
-                            full_response = "" # Reset response buffer for next candidate
+                            err_str_lower = last_error.lower()
+                            
+                            # Detect rate limit or free tier exhaustion
+                            if "429" in last_error or "rate limit" in err_str_lower or "quota" in err_str_lower or "free" in err_str_lower:
+                                rate_limit_encountered = True
+                                status.write(f"⏳ **Free Tier Limit / Rate Limit Reached** for `{model_candidate}`. Auto-switching to next available free model...")
+                            else:
+                                status.write(f"⚠️ `{model_candidate}` failed ({last_error[:60]}...). Trying fallback...")
+                            
+                            full_response = "" # Reset stream buffer before trying next model
 
                     if not success:
-                        status.update(label="❌ All Free Models Busy", state="error")
+                        status.update(label="❌ Free Tier Temporarily Exhausted", state="error")
+                        
+                        rate_limit_notice = ""
+                        if rate_limit_encountered:
+                            rate_limit_notice = (
+                                "🛑 **Free Tier Daily/Per-Minute Quota Exceeded**\n\n"
+                                "• **Reset Time**: OpenRouter free-tier rate limits reset **hourly** or daily at **00:00 UTC**.\n"
+                                "• **What to do**: Wait 30–60 seconds and click **'🔄 Regenerate / Retry Response'**, or select a different model from the dropdown above.\n\n"
+                            )
+                        
                         err_msg = (
-                            f"⚠️ **API Exception**: `{last_error}`\n\n"
-                            "*All free endpoints are temporarily overloaded. Please wait 10 seconds and click '🔄 Regenerate'."
+                            f"{rate_limit_notice}"
+                            f"⚠️ **Error Details**: `{last_error}`"
                         )
                         st.error(err_msg)
                         chat_history.append({"role": "assistant", "content": err_msg})
@@ -735,7 +769,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                                 raw_json = clean_json_response(res.choices[0].message.content)
                                 st.session_state.quiz = json.loads(raw_json)
                             except Exception as qe:
-                                st.error(f"Quiz Generation Error: {str(qe)}")
+                                st.error(f"Quiz Generation Error: {str(qe)}. Free-tier limits may be active, try switching workspace model.")
 
                 if "quiz" in st.session_state:
                     st.divider()
