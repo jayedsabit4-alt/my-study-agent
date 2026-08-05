@@ -175,9 +175,9 @@ def compress_image_to_b64(image_bytes, max_dim=1000, quality=75):
         return f"data:image/jpeg;base64,{b64_str}"
 
 
-# --- SINGLE FILE EXTRACTOR ---
+# --- FAULT-TOLERANT FILE EXTRACTOR ---
 def extract_file_data(uploaded_file):
-    """Extracts text and image payload from a single file object."""
+    """Extracts text and image payload with crash protection for corrupted/truncated PDFs."""
     file_type = uploaded_file.name.split(".")[-1].lower()
     extracted_text = ""
     image_url = None
@@ -190,22 +190,35 @@ def extract_file_data(uploaded_file):
         elif file_type == "pdf":
             from pypdf import PdfReader
 
-            reader = PdfReader(uploaded_file)
             pdf_text = []
-            for page_idx, page in enumerate(reader.pages):
-                if page_idx >= 40:  # Safety threshold
-                    pdf_text.append("\n[Truncated remaining pages for performance]")
-                    break
-                txt = page.extract_text()
-                if txt:
-                    pdf_text.append(txt)
+            try:
+                pdf_stream = io.BytesIO(uploaded_file.getvalue())
+                reader = PdfReader(pdf_stream, strict=False)
 
-            extracted_text = "\n".join(pdf_text) if pdf_text else "[Scanned/Handwritten PDF Context]"
+                for page_idx, page in enumerate(reader.pages):
+                    if page_idx >= 50:
+                        pdf_text.append("\n[Truncated remaining pages for performance]")
+                        break
+                    try:
+                        txt = page.extract_text()
+                        if txt:
+                            pdf_text.append(txt)
+                    except Exception:
+                        continue
+
+            except Exception as stream_err:
+                pdf_text.append(f"[Partial PDF Recovery: Stream error ({str(stream_err)})]")
+
+            extracted_text = (
+                "\n".join(pdf_text)
+                if pdf_text
+                else "[Scanned/Handwritten or unreadable PDF Content]"
+            )
 
         elif file_type == "docx":
             from docx import Document
 
-            doc = Document(uploaded_file)
+            doc = Document(io.BytesIO(uploaded_file.getvalue()))
             extracted_text = "\n".join([p.text for p in doc.paragraphs])
 
         elif file_type in ["csv", "xlsx"]:
@@ -373,7 +386,7 @@ if st.session_state.active_mode == "general_chat":
             st.error("Please enter an OpenRouter API key in the sidebar first!")
         else:
             client = get_openrouter_client(st.session_state.saved_openrouter_key)
-            
+
             temp_file_text = ""
             image_urls = []
             if attached_files:
