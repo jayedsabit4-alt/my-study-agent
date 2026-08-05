@@ -10,59 +10,67 @@ from PIL import Image
 import streamlit as st
 
 
-import streamlit as st
 
-# 1. Set mobile-friendly layout configuration
+
+# 1. Page Configuration
 st.set_page_config(
     page_title="AI Study Notebook",
     page_icon="🎓",
-    layout="centered",  # Keeps content stacked neatly in a single mobile column
-    initial_sidebar_state="collapsed",  # Automatically hides sidebar on mobile screens
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
-# 2. Inject CSS to remove blank margins and create a clean Gemini-like UI
+# 2. CSS: Lock horizontal scroll (anti-wobble) & restore sidebar icon
 st.markdown(
     """
     <style>
-    /* Remove unnecessary top and side padding */
+    /* Prevent horizontal page wobble entirely */
+    html, body, [data-testid="stAppViewContainer"], .main {
+        overflow-x: hidden !important;
+        max-width: 100vw !important;
+    }
+
+    /* Container alignment for mobile screen width */
     .block-container {
-        padding-top: 1.5rem !important;
-        padding-bottom: 3rem !important;
-        padding-left: 1rem !important;
-        padding-right: 1rem !important;
+        padding-top: 3.5rem !important; /* Space for the top sidebar toggle icon */
+        padding-bottom: 2rem !important;
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
         max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Make header transparent so top-left sidebar menu button is visible */
+    header[data-testid="stHeader"] {
+        background-color: transparent !important;
+        z-index: 99999 !important;
+    }
+
+    /* Force all text, code blocks, and chat bubbles to wrap inside the screen width */
+    * {
+        box-sizing: border-box !important;
     }
     
-    /* Hide default Streamlit headers and footers */
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    #MainMenu {visibility: hidden;}
+    p, span, div, code, pre {
+        white-space: pre-wrap !important;
+        word-break: break-word !important;
+        overflow-wrap: anywhere !important;
+    }
 
-    /* Make input boxes and text areas clean and rounded like Gemini */
+    /* Chat input & text field constraints */
     .stTextInput > div > div > input, .stTextArea textarea {
-        border-radius: 18px !important;
-        border: 1px solid #d1d5db !important;
-        padding: 10px 15px !important;
+        border-radius: 16px !important;
+        max-width: 100% !important;
     }
 
-    /* Style buttons for mobile touch targets */
     .stButton > button {
-        border-radius: 20px !important;
+        border-radius: 16px !important;
         width: 100% !important;
-        height: 48px !important;
-        font-weight: 600 !important;
-    }
-
-    /* Prevent wide tables or code blocks from overflowing the screen */
-    .stTable, div[data-testid="stTable"] {
-        overflow-x: auto !important;
-        display: block !important;
     }
     </style>
 """,
     unsafe_allow_html=True,
 )
-
 # Optional sklearn dependency for local RAG vector similarity
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
