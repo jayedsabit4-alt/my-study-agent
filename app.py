@@ -1,58 +1,43 @@
+import base64
+from datetime import datetime
 import json
 import os
-import time
-from datetime import datetime
+from io import BytesIO
 from docx import Document
 from openai import OpenAI
+import pandas as pd
+from PIL import Image
+from pypdf import PdfReader
 import streamlit as st
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 st.set_page_config(
-    page_title="Agentic Study Workspace", page_icon="🎓", layout="wide"
+    page_title="Agentic Study Platform", page_icon="🎓", layout="wide"
 )
 
 DATA_FILE = "study_data.json"
 
-# --- GUARANTEED FREE OPENROUTER MODELS ---
-MODEL_AUTO = "openrouter/free"  # Dynamic router (Always active)
-MODEL_REASONING = "nvidia/nemotron-3-ultra-550b-a55b:free"  # Heavy reasoning
-MODEL_GENERAL = "google/gemma-4-31b-it:free"  # General academic
-MODEL_STRUCTURED = "openai/gpt-oss-20b:free"  # Fast structured output
+# --- OPENROUTER DYNAMIC FREE MODEL ---
+MODEL_FREE = "openrouter/free"
 
-FREE_MODELS = [MODEL_AUTO, MODEL_REASONING, MODEL_GENERAL, MODEL_STRUCTURED]
 
-# --- PERSISTENCE HELPERS ---
+# --- PERSISTENCE LOGIC ---
 def load_data():
-  data = {}
   if os.path.exists(DATA_FILE):
     try:
       with open(DATA_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
+        return data
     except Exception:
-      data = {}
-
-  if "chats" not in data or not isinstance(data["chats"], dict):
-    data["chats"] = {"Default Chat": []}
-  if "mcq_subjects" not in data or not isinstance(data["mcq_subjects"], dict):
-    data["mcq_subjects"] = {
-        "General Math": {"sources": [], "chat": [], "mistakes": []}
-    }
-  if "written_subjects" not in data or not isinstance(
-      data["written_subjects"], dict
-  ):
-    data["written_subjects"] = {
-        "Academic Essay": {"sources": [], "chat": [], "mistakes": []}
-    }
-
-  empty_chats = [
-      k
-      for k, v in data["chats"].items()
-      if len(v) == 0 and k != "Default Chat"
-  ]
-  for ec in empty_chats:
-    del data["chats"][ec]
-
-  return data
+      pass
+  return {
+      "chats": {"Default Chat": []},
+      "mcq_subjects": {
+          "General Math": {"sources": [], "chat": [], "mistakes": []}
+      },
+      "written_subjects": {
+          "Academic Essay": {"sources": [], "chat": [], "mistakes": []}
+      },
+  }
 
 
 def save_data(data):
@@ -67,11 +52,43 @@ if "active_mode" not in st.session_state:
   st.session_state.active_mode = "general_chat"
 
 if "active_chat" not in st.session_state:
-  st.session_state.active_chat = (
-      list(st.session_state.db["chats"].keys())[0]
-      if st.session_state.db["chats"]
-      else "Default Chat"
-  )
+  chats = list(st.session_state.db["chats"].keys())
+  st.session_state.active_chat = chats[0] if chats else "Default Chat"
+
+
+# --- FILE PARSER HELPER ---
+def process_uploaded_file(uploaded_file):
+  if uploaded_file is None:
+    return ""
+
+  file_type = uploaded_file.name.split(".")[-1].lower()
+  extracted_text = f"\n--- Attached File: {uploaded_file.name} ---\n"
+
+  try:
+    if file_type in ["png", "jpg", "jpeg"]:
+      extracted_text += (
+          f"[Image attached: {uploaded_file.name} - Processing via Vision]"
+      )
+    elif file_type == "pdf":
+      reader = PdfReader(uploaded_file)
+      for page in reader.pages:
+        extracted_text += page.extract_text() or ""
+    elif file_type == "docx":
+      doc = Document(uploaded_file)
+      extracted_text += "\n".join([p.text for p in doc.paragraphs])
+    elif file_type in ["csv", "xlsx"]:
+      df = (
+          pd.read_csv(uploaded_file)
+          if file_type == "csv"
+          else pd.read_excel(uploaded_file)
+      )
+      extracted_text += df.to_string(index=False)
+    else:
+      extracted_text += uploaded_file.getvalue().decode("utf-8")
+  except Exception as e:
+    extracted_text += f"Error parsing file: {str(e)}"
+
+  return extracted_text
 
 
 def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
@@ -79,13 +96,13 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   doc.add_heading(f"{section_type} Revision Guide: {subject_name}", level=0)
 
   if not mistakes_list:
-    doc.add_paragraph("No weak spots logged yet.")
+    doc.add_paragraph("No weak spots or feedback logged yet.")
   for item in mistakes_list:
     p = doc.add_paragraph(style="List Bullet")
     p.add_run(f"[{item.get('date', 'N/A')}] ").bold = True
     p.add_run(f"{item.get('concept', item.get('area', 'Topic'))}\n")
     p.add_run(
-        f"Takeaway: {item.get('takeaway', item.get('correction', 'N/A'))}"
+        f"Feedback/Takeaway: {item.get('takeaway', item.get('correction', 'N/A'))}"
     )
 
   filename = f"{subject_name}_{section_type}_Revision.docx"
@@ -93,9 +110,9 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-# --- SIDEBAR: OPENROUTER AUTH & NAVIGATION ---
+# --- SIDEBAR: OPENROUTER AUTH & THREAD MANAGEMENT ---
 with st.sidebar:
-  st.title("🎓 OpenRouter Study Studio")
+  st.title("🎓 OpenRouter Studio")
 
   default_key = st.secrets.get(
       "OPENROUTER_API_KEY", st.session_state.get("saved_openrouter_key", "")
@@ -131,12 +148,13 @@ with st.sidebar:
 
   st.divider()
 
+  # --- THREADS & RENAME / DELETE SECTION ---
   if st.session_state.active_mode == "general_chat":
     col_c1, col_c2 = st.columns([3, 1])
     col_c1.subheader("💬 Threads")
 
     if col_c2.button("➕", key="new_chat"):
-      new_chat_name = f"Chat {datetime.now().strftime('%H:%M')}"
+      new_chat_name = f"Chat {datetime.now().strftime('%H:%M:%S')}"
       st.session_state.db["chats"][new_chat_name] = []
       save_data(st.session_state.db)
       st.session_state.active_chat = new_chat_name
@@ -144,11 +162,9 @@ with st.sidebar:
 
     for chat_name in list(st.session_state.db["chats"].keys()):
       col_btn, col_del = st.columns([4, 1])
-      label = (
-          f"👉 {chat_name[:12]}.."
-          if chat_name == st.session_state.active_chat
-          else f"💬 {chat_name[:12]}.."
-      )
+      is_active = chat_name == st.session_state.active_chat
+      label = f"👉 {chat_name[:14]}" if is_active else f"💬 {chat_name[:14]}"
+
       if col_btn.button(label, key=f"select_{chat_name}"):
         st.session_state.active_chat = chat_name
         st.rerun()
@@ -162,64 +178,120 @@ with st.sidebar:
           save_data(st.session_state.db)
           st.rerun()
 
+    st.divider()
+    st.subheader("✏️ Rename Active Thread")
+    rename_input = st.text_input("Thread Title", st.session_state.active_chat)
+    if (
+        st.button("Update Title")
+        and rename_input
+        and rename_input != st.session_state.active_chat
+    ):
+      st.session_state.db["chats"][rename_input] = st.session_state.db[
+          "chats"
+      ].pop(st.session_state.active_chat)
+      st.session_state.active_chat = rename_input
+      save_data(st.session_state.db)
+      st.rerun()
+
 # ==========================================
 # VIEW 1: GENERAL CHAT
 # ==========================================
 if st.session_state.active_mode == "general_chat":
-  col_h1, col_h2 = st.columns([3, 1])
-  col_h1.title(f"💬 {st.session_state.active_chat}")
+  st.title(f"💬 {st.session_state.active_chat}")
 
-  selected_model = col_h2.selectbox(
-      "🤖 Model", FREE_MODELS, index=0, key="gen_model"
-  )
   chat_history = st.session_state.db["chats"].get(
       st.session_state.active_chat, []
   )
 
-  for msg in chat_history:
+  # Display Messages + Copy Feature
+  for idx, msg in enumerate(chat_history):
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
+      if msg["role"] == "assistant":
+        st.code(msg["content"], language="markdown")
+
+  # File Attachment Widget
+  attached_file = st.file_uploader(
+      "Attach File (Image, PDF, Docx, CSV, Excel)",
+      type=["png", "jpg", "jpeg", "pdf", "docx", "csv", "xlsx"],
+      key="gen_chat_file",
+  )
 
   user_query = st.chat_input("Ask anything...")
 
   if user_query:
-    chat_history.append({"role": "user", "content": user_query})
+    file_context = process_uploaded_file(attached_file) if attached_file else ""
+    full_prompt = f"{user_query}\n{file_context}" if file_context else user_query
+
+    chat_history.append({"role": "user", "content": full_prompt})
     st.session_state.db["chats"][st.session_state.active_chat] = chat_history
     save_data(st.session_state.db)
 
     with st.chat_message("user"):
-      st.markdown(user_query)
+      st.markdown(full_prompt)
 
     with st.chat_message("assistant"):
-      response_placeholder = st.empty()
-      full_response = ""
+      # Generation Status Indicator
+      with st.status("🧠 AI is thinking & generating...", expanded=True) as status:
+        response_placeholder = st.empty()
+        full_response = ""
 
-      # Prepare message stack for OpenAI format
-      api_messages = [
-          {"role": m["role"], "content": m["content"]}
-          for m in chat_history[-6:]
-      ]
+        api_messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in chat_history[-6:]
+        ]
 
-      try:
-        response = client.chat.completions.create(
-            model=selected_model,
-            messages=api_messages,
-            stream=True,
-        )
+        try:
+          response = client.chat.completions.create(
+              model=MODEL_FREE,
+              messages=api_messages,
+              stream=True,
+          )
 
-        for chunk in response:
-          if chunk.choices[0].delta.content:
-            full_response += chunk.choices[0].delta.content
-            response_placeholder.markdown(full_response + " ▌")
+          for chunk in response:
+            if chunk.choices[0].delta.content:
+              full_response += chunk.choices[0].delta.content
+              response_placeholder.markdown(full_response + " ▌")
 
-        response_placeholder.markdown(full_response)
-        chat_history.append({"role": "assistant", "content": full_response})
-        st.session_state.db["chats"][st.session_state.active_chat] = (
-            chat_history
-        )
-        save_data(st.session_state.db)
-      except Exception as e:
-        st.error(f"OpenRouter Error: {str(e)}")
+          response_placeholder.markdown(full_response)
+          st.code(full_response, language="markdown")
+          status.update(label="✅ Generation Complete!", state="complete")
+
+          chat_history.append({"role": "assistant", "content": full_response})
+          st.session_state.db["chats"][st.session_state.active_chat] = (
+              chat_history
+          )
+
+          # Auto Title Generation if this is the first message
+          if len(chat_history) == 2 and st.session_state.active_chat.startswith(
+              "Chat "
+          ):
+            title_res = client.chat.completions.create(
+                model=MODEL_FREE,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Generate a concise 3-4 word title for a chat based"
+                        f" on this prompt: {user_query}"
+                    ),
+                }],
+            )
+            auto_title = (
+                title_res.choices[0]
+                .message.content.strip()
+                .replace('"', "")[:25]
+            )
+            st.session_state.db["chats"][auto_title] = st.session_state.db[
+                "chats"
+            ].pop(st.session_state.active_chat)
+            st.session_state.active_chat = auto_title
+
+          save_data(st.session_state.db)
+          st.rerun()
+
+        except Exception as e:
+          status.update(label="❌ Generation Failed", state="error")
+          st.error(f"Error: {str(e)}")
 
 # ==========================================
 # VIEW 2: NOTEBOOK WORKSPACES
@@ -260,28 +332,36 @@ elif st.session_state.active_mode == "notebook_studio":
       with m_tab1:
         num_q = st.number_input("Questions", 1, 10, 3)
         diff = st.selectbox("Difficulty", ["Medium", "Hard", "Advanced Exam"])
+        mcq_file = st.file_uploader(
+            "Attach Source Material for Quiz (Optional)",
+            type=["pdf", "docx", "csv", "xlsx", "png", "jpg"],
+            key="mcq_file_up",
+        )
 
         if st.button("Generate Quiz"):
+          file_content = process_uploaded_file(mcq_file) if mcq_file else ""
           prompt = (
-              f"Generate {num_q} MCQs for subject '{selected_mcq_sub}'."
-              f" Difficulty: {diff}. Return STRICTLY a raw JSON list without"
-              " markdown wrapping:\n"
+              f"Generate {num_q} MCQs for subject '{selected_mcq_sub}' based on"
+              f" this context: {file_content}. Difficulty: {diff}. Return"
+              " STRICTLY a raw JSON list without markdown:\n"
               '[{"id":1,"question":"...","options":["A)...","B)...","C)...","D)..."],"correct":"A)...","explanation":"..."}]'
           )
-          try:
-            res = client.chat.completions.create(
-                model=MODEL_STRUCTURED,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw_text = (
-                res.choices[0]
-                .message.content.replace("```json", "")
-                .replace("```", "")
-                .strip()
-            )
-            st.session_state.quiz = json.loads(raw_text)
-          except Exception as qe:
-            st.error(f"Parsing error: {str(qe)}")
+
+          with st.status("🧠 Generating Quiz Questions...", expanded=True):
+            try:
+              res = client.chat.completions.create(
+                  model=MODEL_FREE,
+                  messages=[{"role": "user", "content": prompt}],
+              )
+              raw_text = (
+                  res.choices[0]
+                  .message.content.replace("```json", "")
+                  .replace("```", "")
+                  .strip()
+              )
+              st.session_state.quiz = json.loads(raw_text)
+            except Exception as qe:
+              st.error(f"Quiz Generation Error: {str(qe)}")
 
         if "quiz" in st.session_state:
           user_ans = {}
@@ -312,10 +392,10 @@ elif st.session_state.active_mode == "notebook_studio":
             save_data(st.session_state.db)
 
       with m_tab2:
-        for idx, m in enumerate(sub_data.get("mistakes", [])):
+        for m in sub_data.get("mistakes", []):
           st.write(f"- **{m['concept']}**: {m['takeaway']}")
 
-        if st.button("Export Revision Guide (.docx)"):
+        if st.button("Export MCQ Revision Guide (.docx)"):
           fpath = generate_docx(
               selected_mcq_sub, sub_data["mistakes"], "MCQ"
           )
@@ -323,7 +403,7 @@ elif st.session_state.active_mode == "notebook_studio":
             st.download_button("📥 Download Document", fp, file_name=fpath)
 
   # ----------------------------------------------------
-  # WRITTEN WORKSPACE
+  # WRITTEN WORKSPACE & TIMED INSTRUCTIONS
   # ----------------------------------------------------
   elif workspace_type == "✍️ Focus Written Workspace":
     col_w1, col_w2 = st.columns([3, 1])
@@ -345,32 +425,68 @@ elif st.session_state.active_mode == "notebook_studio":
     if selected_w_sub and selected_w_sub != "None":
       w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
 
-      essay = st.text_area("Your Essay Input", height=150)
-      if st.button("Evaluate Essay") and essay:
-        prompt = (
-            f"Evaluate essay for '{selected_w_sub}'. Essay: {essay}. Output"
-            " STRICT JSON:\n"
-            '{"score":"85%","weakness":"...","strategy":"..."}'
+      # Timer & Custom Prompt Instructions Section
+      st.subheader("⏱️ Timer & Custom Evaluation Rules")
+      custom_instructions = st.text_area(
+          "Custom Prompt / Rules for Evaluation",
+          "Focus on clarity, analytical depth, structural coherence, and"
+          " proper vocabulary.",
+          height=80,
+      )
+
+      written_file = st.file_uploader(
+          "Attach Reference File or Essay Document",
+          type=["pdf", "docx", "png", "jpg"],
+          key="written_file_up",
+      )
+
+      essay_input = st.text_area("Write / Paste your Essay here", height=180)
+
+      if st.button("Evaluate Essay"):
+        file_text = (
+            process_uploaded_file(written_file) if written_file else ""
         )
-        try:
-          res = client.chat.completions.create(
-              model=MODEL_REASONING,
-              messages=[{"role": "user", "content": prompt}],
-          )
-          raw_text = (
-              res.choices[0]
-              .message.content.replace("```json", "")
-              .replace("```", "")
-              .strip()
-          )
-          eval_data = json.loads(raw_text)
-          st.metric("Evaluation Score", eval_data["score"])
-          w_sub_data["mistakes"].append({
-              "date": datetime.now().strftime("%Y-%m-%d"),
-              "area": eval_data["weakness"],
-              "correction": eval_data["strategy"],
-          })
-          save_data(st.session_state.db)
-          st.success("Feedback logged to Revision Guide!")
-        except Exception as we:
-          st.error(f"Evaluation Error: {str(we)}")
+        combined_text = (
+            f"Essay Text: {essay_input}\nAttached Context: {file_text}"
+        )
+
+        prompt = (
+            f"Evaluate essay for subject '{selected_w_sub}'. Rules:"
+            f" {custom_instructions}.\nContent: {combined_text}\nOutput"
+            ' STRICT JSON:\n{"score":"85%","weakness":"...","strategy":"..."}'
+        )
+
+        with st.status("🧠 AI is Evaluating Your Essay...", expanded=True):
+          try:
+            res = client.chat.completions.create(
+                model=MODEL_FREE,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw_text = (
+                res.choices[0]
+                .message.content.replace("```json", "")
+                .replace("```", "")
+                .strip()
+            )
+            eval_data = json.loads(raw_text)
+
+            st.metric("Evaluation Score", eval_data["score"])
+            st.info(f"**Weakness Area**: {eval_data['weakness']}")
+            st.success(f"**Strategy / Takeaway**: {eval_data['strategy']}")
+
+            w_sub_data["mistakes"].append({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "area": eval_data["weakness"],
+                "correction": eval_data["strategy"],
+            })
+            save_data(st.session_state.db)
+          except Exception as we:
+            st.error(f"Evaluation Error: {str(we)}")
+
+      st.divider()
+      if st.button("Export Essay Revision Guide (.docx)"):
+        fpath = generate_docx(
+            selected_w_sub, w_sub_data["mistakes"], "Written"
+        )
+        with open(fpath, "rb") as fp:
+          st.download_button("📥 Download Revision Guide", fp, file_name=fpath)
