@@ -15,15 +15,22 @@ st.set_page_config(
 DATA_FILE = "study_data.json"
 
 MODEL_OPTIONS = {
-    "google/gemma-4-31b-it:free (Vision & Document OCR)": (
-        "google/gemma-4-31b-it:free"
+    "openrouter/free (Auto-Router - Highest Uptime)": "openrouter/free",
+    "meta-llama/llama-3.3-70b-instruct:free (High Accuracy)": (
+        "meta-llama/llama-3.3-70b-instruct:free"
     ),
-    "openrouter/free (Auto-Router - Multimodal & Fast)": "openrouter/free",
+    "google/gemma-2-9b-it:free (Fast & Multimodal)": "google/gemma-2-9b-it:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free (Deep Reasoning)": (
         "nvidia/nemotron-3-ultra-550b-a55b:free"
     ),
-    "openai/gpt-oss-20b:free (Lightweight Chat)": "openai/gpt-oss-20b:free",
 }
+
+# Fallback sequence if primary free model is rate-limited
+FALLBACK_MODELS = [
+    "openrouter/free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-2-9b-it:free",
+]
 
 MATH_SYSTEM_PROMPT = {
     "role": "system",
@@ -95,7 +102,7 @@ def get_openrouter_client(api_key):
     from openai import OpenAI
 
     return OpenAI(
-        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=60.0
+        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=45.0
     )
 
 
@@ -195,7 +202,6 @@ def extract_file_data(uploaded_file):
         elif file_type == "pdf":
             pdf_text = []
             
-            # Primary Engine: Try pdfplumber for table and layout extraction
             try:
                 import pdfplumber
                 with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
@@ -230,7 +236,6 @@ def extract_file_data(uploaded_file):
                             pdf_text.append(page_content)
 
             except Exception:
-                # Fallback Engine: pypdf if pdfplumber fails
                 from pypdf import PdfReader
                 pdf_stream = io.BytesIO(uploaded_file.getvalue())
                 reader = PdfReader(pdf_stream, strict=False)
@@ -398,7 +403,7 @@ if st.session_state.active_mode == "general_chat":
                 with st.expander("📋 Copy Raw Text"):
                     st.code(msg["content"], language="markdown")
 
-    # --- REGENERATE BUTTON FOR LAST QUERY ---
+    # --- REGENERATE BUTTON ---
     if chat_history and chat_history[-1]["role"] in ["user", "assistant"]:
         col_reg, _ = st.columns([2, 5])
         if col_reg.button("🔄 Regenerate / Retry Response", key="btn_regen_chat"):
@@ -427,7 +432,6 @@ if st.session_state.active_mode == "general_chat":
 
     user_query = st.chat_input("Ask anything, request a math derivation, or submit a problem...")
 
-    # Handle standard prompt OR Regenerate button click
     should_process = False
     if user_query:
         should_process = True
@@ -436,7 +440,6 @@ if st.session_state.active_mode == "general_chat":
         should_process = True
         st.session_state.trigger_regenerate = False
         
-        # If last message was assistant/error, remove it before regenerating
         if chat_history[-1]["role"] == "assistant":
             chat_history.pop()
         
@@ -460,7 +463,6 @@ if st.session_state.active_mode == "general_chat":
                     if f_data.get("image_url"):
                         image_urls.append(f_data["image_url"])
 
-            # Save clean message to chat history if new input
             if not (st.session_state.trigger_regenerate and chat_history[-1]["role"] == "user"):
                 user_msg_record = {
                     "role": "user",
@@ -482,7 +484,6 @@ if st.session_state.active_mode == "general_chat":
                     response_placeholder = st.empty()
                     full_response = ""
 
-                    # Clean history construction - pass text without bloating context window
                     api_messages = [MATH_SYSTEM_PROMPT]
                     for m in chat_history[-6:-1]:
                         api_messages.append({"role": m["role"], "content": m["content"]})
@@ -496,37 +497,54 @@ if st.session_state.active_mode == "general_chat":
                     else:
                         api_messages.append({"role": "user", "content": latest_prompt})
 
-                    try:
-                        response = client.chat.completions.create(
-                            model=selected_model_slug, messages=api_messages, stream=True
+                    # --- MULTI-MODEL FALLBACK CIRCUIT ---
+                    candidate_models = [selected_model_slug] + [
+                        m for m in FALLBACK_MODELS if m != selected_model_slug
+                    ]
+                    
+                    success = False
+                    last_error = None
+
+                    for model_candidate in candidate_models:
+                        try:
+                            status.write(f"📡 Connecting to model: `{model_candidate}`...")
+                            response = client.chat.completions.create(
+                                model=model_candidate, messages=api_messages, stream=True
+                            )
+
+                            for chunk in response:
+                                if hasattr(chunk, "choices") and chunk.choices:
+                                    choice = chunk.choices[0]
+                                    if hasattr(choice, "delta") and choice.delta:
+                                        content = getattr(choice.delta, "content", None)
+                                        if content:
+                                            full_response += content
+                                            response_placeholder.markdown(
+                                                fix_latex_formatting(full_response) + " ▌"
+                                            )
+
+                            cleaned_final = fix_latex_formatting(full_response)
+                            if cleaned_final.strip():
+                                response_placeholder.markdown(cleaned_final)
+                                status.update(label="✅ Response Complete!", state="complete")
+                                
+                                chat_history.append({"role": "assistant", "content": cleaned_final})
+                                st.session_state.db["chats"][st.session_state.active_chat] = chat_history
+                                save_data(st.session_state.db)
+                                success = True
+                                break
+
+                        except Exception as ex:
+                            last_error = str(ex)
+                            status.write(f"⚠️ `{model_candidate}` unavailable ({last_error[:80]}...). Switching backup model...")
+                            full_response = "" # Reset response buffer for next candidate
+
+                    if not success:
+                        status.update(label="❌ All Free Models Busy", state="error")
+                        err_msg = (
+                            f"⚠️ **API Exception**: `{last_error}`\n\n"
+                            "*All free endpoints are temporarily overloaded. Please wait 10 seconds and click '🔄 Regenerate'."
                         )
-
-                        for chunk in response:
-                            if hasattr(chunk, "choices") and chunk.choices:
-                                choice = chunk.choices[0]
-                                if hasattr(choice, "delta") and choice.delta:
-                                    content = getattr(choice.delta, "content", None)
-                                    if content:
-                                        full_response += content
-                                        response_placeholder.markdown(
-                                            fix_latex_formatting(full_response) + " ▌"
-                                        )
-
-                        cleaned_final = fix_latex_formatting(full_response)
-                        if not cleaned_final.strip():
-                            cleaned_final = "*(Model returned empty response. Please try switching models.)*"
-
-                        response_placeholder.markdown(cleaned_final)
-                        status.update(label="✅ Response Done!", state="complete")
-
-                        chat_history.append({"role": "assistant", "content": cleaned_final})
-                        st.session_state.db["chats"][st.session_state.active_chat] = chat_history
-                        save_data(st.session_state.db)
-                        st.rerun()
-
-                    except Exception as e:
-                        status.update(label="❌ API Error Occurred", state="error")
-                        err_msg = f"⚠️ **Execution Error**: `{str(e)}`\n\n*Tip: Try clicking '🔄 Regenerate' or switch to another model in the dropdown above.*"
                         st.error(err_msg)
                         chat_history.append({"role": "assistant", "content": err_msg})
                         st.session_state.db["chats"][st.session_state.active_chat] = chat_history
