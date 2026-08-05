@@ -27,22 +27,34 @@ def fix_latex_formatting(text: str) -> str:
     # 2. Convert inline math ( \symbol ) or \( \symbol \) into $ \symbol $
     text = re.sub(r'(?:\\\Custom\(|\()\s*(\\.*?)\s*(?:\\\Custom\Component|\))', r'$\1$', text)
     
-    # 3. Handle edge cases where math functions are missing delimiters entirely inside standalone lines
+    # 3. Handle standalone math function lines missing delimiters
     text = re.sub(r'(?m)^\\(frac|sqrt|left|mathrm|mathbf|boldsymbol)\{.*\}$', r'$$\g<0>$$', text)
     
     return text
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
+    """
+    Loads persistent data with strict fallback defaults to prevent KeyError crashes.
+    """
+    default_structure = {
         "threads": {"Default Session": []},
         "evaluations": {"mcq": [], "essay": []}
     }
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f:
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    return default_structure
+                # Ensure all essential keys exist even if file was legacy or partially written
+                if "threads" not in data or not data["threads"]:
+                    data["threads"] = {"Default Session": []}
+                if "evaluations" not in data:
+                    data["evaluations"] = {"mcq": [], "essay": []}
+                return data
+        except Exception:
+            return default_structure
+    return default_structure
 
 def save_data(data):
     with open(DATA_FILE, "w") as f:
@@ -72,15 +84,17 @@ def parse_file(uploaded_file):
     return text
 
 # ==============================================================================
-# 2. APP INITIALIZATION & STATE SETUP
+# 2. APP INITIALIZATION & SAFE STATE SETUP
 # ==============================================================================
 st.set_page_config(page_title="Agentic Study Platform", layout="wide", page_icon="📚")
 
 if "db" not in st.session_state:
     st.session_state.db = load_data()
 
-if "current_thread" not in st.session_state:
-    st.session_state.current_thread = list(st.session_state.db["threads"].keys())[0]
+# Safe state assignment to prevent KeyError on startup
+threads_dict = st.session_state.db.get("threads", {"Default Session": []})
+if "current_thread" not in st.session_state or st.session_state.current_thread not in threads_dict:
+    st.session_state.current_thread = list(threads_dict.keys())[0]
 
 # System prompt forcing LaTeX compliance
 SYSTEM_PROMPT = """You are an expert AI Study Assistant.
@@ -91,7 +105,6 @@ When outputting mathematical expressions, physics derivations, chemical formulas
 Provide clear, structured, and complete academic explanations.
 """
 
-# OpenRouter Available Free Models
 AVAILABLE_MODELS = {
     "DeepSeek R1 (Free)": "deepseek/deepseek-r1:free",
     "Meta Llama 3.3 70B (Free)": "meta-llama/llama-3.3-70b-instruct:free",
@@ -121,12 +134,13 @@ with st.sidebar:
             save_data(st.session_state.db)
             st.rerun()
 
-    # Select existing thread
+    # Select existing thread safely
     threads_list = list(st.session_state.db["threads"].keys())
+    current_index = threads_list.index(st.session_state.current_thread) if st.session_state.current_thread in threads_list else 0
     st.session_state.current_thread = st.selectbox(
         "Select Active Thread",
         threads_list,
-        index=threads_list.index(st.session_state.current_thread) if st.session_state.current_thread in threads_list else 0
+        index=current_index
     )
     
     st.markdown("---")
@@ -134,11 +148,10 @@ with st.sidebar:
     uploaded_files = st.file_uploader("Attach study materials (PDF, DOCX, CSV, XLSX)", accept_multiple_files=True)
 
 # ==============================================================================
-# 4. MAIN WORKSPACE SETUP (TABS)
+# 4. MAIN WORKSPACE SETUP
 # ==============================================================================
 tab_chat, tab_mcq, tab_essay = st.tabs(["💬 Chat & Workspace", "📝 MCQ Evaluation", "📄 Essay Evaluation"])
 
-# Lazy client instantiation helper
 def get_openrouter_client():
     if not api_key:
         st.warning("Please enter your OpenRouter API Key in the sidebar to generate responses.")
@@ -154,22 +167,20 @@ def get_openrouter_client():
 with tab_chat:
     st.header(f"Session: {st.session_state.current_thread}")
     
-    # Process attached files into context string
+    # File context parser
     file_context = ""
     if uploaded_files:
         for f in uploaded_files:
             file_context += f"\n\n--- Content from {f.name} ---\n" + parse_file(f)
 
-    # Display thread message history
-    current_messages = st.session_state.db["threads"][st.session_state.current_thread]
+    # Render message history
+    current_messages = st.session_state.db["threads"].get(st.session_state.current_thread, [])
     for msg in current_messages:
         with st.chat_message(msg["role"]):
-            # Pass saved responses through LaTeX regex renderer
             st.markdown(fix_latex_formatting(msg["content"]))
 
-    # Input field for user query
+    # User Input
     if user_query := st.chat_input("Ask a question, request a formula derivation, or submit a problem..."):
-        # Append user message
         st.session_state.db["threads"][st.session_state.current_thread].append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
@@ -180,7 +191,6 @@ with tab_chat:
                 message_placeholder = st.empty()
                 full_response = ""
                 
-                # Build context payload
                 api_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
                 for m in st.session_state.db["threads"][st.session_state.current_thread]:
                     api_messages.append({"role": m["role"], "content": m["content"]})
@@ -199,13 +209,11 @@ with tab_chat:
                     for chunk in completion:
                         if chunk.choices and chunk.choices[0].delta.content:
                             full_response += chunk.choices[0].delta.content
-                            # Real-time stream passing through LaTeX renderer
                             message_placeholder.markdown(fix_latex_formatting(full_response) + "▌")
                     
                     cleaned_final_response = fix_latex_formatting(full_response)
                     message_placeholder.markdown(cleaned_final_response)
                     
-                    # Save assistant response to state
                     st.session_state.db["threads"][st.session_state.current_thread].append({
                         "role": "assistant", 
                         "content": cleaned_final_response
