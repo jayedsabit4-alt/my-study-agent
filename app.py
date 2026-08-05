@@ -9,7 +9,7 @@ import pandas as pd
 from PIL import Image
 
 # ==============================================================================
-# 1. HELPER FUNCTIONS & REGEX LATEX FIX
+# 1. LATEX FORMATTING FIX & CORE UTILITIES
 # ==============================================================================
 DATA_FILE = "study_data.json"
 
@@ -27,17 +27,19 @@ def fix_latex_formatting(text: str) -> str:
     # 2. Convert inline math ( \symbol ) or \( \symbol \) into $ \symbol $
     text = re.sub(r'(?:\\\Custom\(|\()\s*(\\.*?)\s*(?:\\\Custom\Component|\))', r'$\1$', text)
     
-    # 3. Handle standalone math function lines missing delimiters
+    # 3. Handle standalone lines starting with LaTeX math commands missing delimiters
     text = re.sub(r'(?m)^\\(frac|sqrt|left|mathrm|mathbf|boldsymbol)\{.*\}$', r'$$\g<0>$$', text)
     
     return text
 
 def load_data():
     """
-    Loads persistent data with strict fallback defaults to prevent KeyError crashes.
+    Loads persistent study data with fallback structures to prevent state crashes.
     """
     default_structure = {
-        "threads": {"Default Session": []},
+        "threads": {"General Chat": []},
+        "notes": {},
+        "mistakes": [],
         "evaluations": {"mcq": [], "essay": []}
     }
     if os.path.exists(DATA_FILE):
@@ -46,9 +48,13 @@ def load_data():
                 data = json.load(f)
                 if not isinstance(data, dict):
                     return default_structure
-                # Ensure all essential keys exist even if file was legacy or partially written
+                # Ensure all modular keys exist
                 if "threads" not in data or not data["threads"]:
-                    data["threads"] = {"Default Session": []}
+                    data["threads"] = {"General Chat": []}
+                if "notes" not in data:
+                    data["notes"] = {}
+                if "mistakes" not in data:
+                    data["mistakes"] = []
                 if "evaluations" not in data:
                     data["evaluations"] = {"mcq": [], "essay": []}
                 return data
@@ -84,25 +90,25 @@ def parse_file(uploaded_file):
     return text
 
 # ==============================================================================
-# 2. APP INITIALIZATION & SAFE STATE SETUP
+# 2. PAGE CONFIGURATION & STATE MANAGEMENT
 # ==============================================================================
-st.set_page_config(page_title="Agentic Study Platform", layout="wide", page_icon="📚")
+st.set_page_config(page_title="Notebook Workspace Platform", layout="wide", page_icon="📖")
 
 if "db" not in st.session_state:
     st.session_state.db = load_data()
 
-# Safe state assignment to prevent KeyError on startup
-threads_dict = st.session_state.db.get("threads", {"Default Session": []})
+# Safe thread assignment
+threads_dict = st.session_state.db.get("threads", {"General Chat": []})
 if "current_thread" not in st.session_state or st.session_state.current_thread not in threads_dict:
     st.session_state.current_thread = list(threads_dict.keys())[0]
 
-# System prompt forcing LaTeX compliance
-SYSTEM_PROMPT = """You are an expert AI Study Assistant.
+# Enhanced System Prompt enforcing mathematical syntax standards
+SYSTEM_PROMPT = """You are an expert academic study platform assistant.
 When outputting mathematical expressions, physics derivations, chemical formulas, or statistical notation:
 1. ALWAYS format inline math using single dollar signs: $...$
 2. ALWAYS format block equations using double dollar signs: $$...$$
-3. NEVER output raw brackets like [ \formula ] or ( \symbol ) for LaTeX rendering.
-Provide clear, structured, and complete academic explanations.
+3. NEVER output raw brackets like [ \\formula ] or ( \\symbol ) for LaTeX rendering.
+Provide rigorous, structured, and complete mathematical derivations and technical explanations.
 """
 
 AVAILABLE_MODELS = {
@@ -113,74 +119,68 @@ AVAILABLE_MODELS = {
 }
 
 # ==============================================================================
-# 3. SIDEBAR NAVIGATION & CONFIG
+# 3. SIDEBAR NAVIGATION
 # ==============================================================================
 with st.sidebar:
-    st.title("📚 Study Agent")
+    st.title("📖 Study Platform")
     
-    api_key = st.text_input("OpenRouter API Key", type="password", help="Enter your OpenRouter key here")
-    selected_model_label = st.selectbox("Select LLM Model", list(AVAILABLE_MODELS.keys()))
+    api_key = st.text_input("OpenRouter API Key", type="password")
+    selected_model_label = st.selectbox("LLM Architecture Model", list(AVAILABLE_MODELS.keys()))
     selected_model = AVAILABLE_MODELS[selected_model_label]
     
     st.markdown("---")
-    st.subheader("💬 Chat Threads")
+    navigation_mode = st.radio("Navigation View", ["💬 General Chat", "📓 Notebook Workspace", "⚠️ Mistake Tracker", "📝 Practice Generator"])
     
-    # Create new thread
-    new_thread_name = st.text_input("New Thread Name")
-    if st.button("➕ Create Thread") and new_thread_name:
+    st.markdown("---")
+    st.subheader("Threads & Workspaces")
+    
+    new_thread_name = st.text_input("New Session Name")
+    if st.button("➕ Create Session") and new_thread_name:
         if new_thread_name not in st.session_state.db["threads"]:
             st.session_state.db["threads"][new_thread_name] = []
             st.session_state.current_thread = new_thread_name
             save_data(st.session_state.db)
             st.rerun()
 
-    # Select existing thread safely
     threads_list = list(st.session_state.db["threads"].keys())
     current_index = threads_list.index(st.session_state.current_thread) if st.session_state.current_thread in threads_list else 0
     st.session_state.current_thread = st.selectbox(
-        "Select Active Thread",
+        "Active Thread",
         threads_list,
         index=current_index
     )
-    
-    st.markdown("---")
-    st.subheader("📁 Upload Reference Files")
-    uploaded_files = st.file_uploader("Attach study materials (PDF, DOCX, CSV, XLSX)", accept_multiple_files=True)
 
-# ==============================================================================
-# 4. MAIN WORKSPACE SETUP
-# ==============================================================================
-tab_chat, tab_mcq, tab_essay = st.tabs(["💬 Chat & Workspace", "📝 MCQ Evaluation", "📄 Essay Evaluation"])
+    st.markdown("---")
+    uploaded_files = st.file_uploader("Multimodal Context (PDF, DOCX, CSV)", accept_multiple_files=True)
 
 def get_openrouter_client():
     if not api_key:
-        st.warning("Please enter your OpenRouter API Key in the sidebar to generate responses.")
+        st.warning("Please enter your OpenRouter API Key in the sidebar.")
         return None
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
+    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+
+# Context parsing from uploaded files
+file_context = ""
+if uploaded_files:
+    for f in uploaded_files:
+        file_context += f"\n\n--- Content from {f.name} ---\n" + parse_file(f)
+
+# ==============================================================================
+# 4. MODULAR VIEWS
+# ==============================================================================
 
 # ------------------------------------------------------------------------------
-# TAB 1: CHAT WORKSPACE
+# VIEW 1: GENERAL CHAT
 # ------------------------------------------------------------------------------
-with tab_chat:
-    st.header(f"Session: {st.session_state.current_thread}")
+if navigation_mode == "💬 General Chat":
+    st.header(f"Session Chat: {st.session_state.current_thread}")
     
-    # File context parser
-    file_context = ""
-    if uploaded_files:
-        for f in uploaded_files:
-            file_context += f"\n\n--- Content from {f.name} ---\n" + parse_file(f)
-
-    # Render message history
     current_messages = st.session_state.db["threads"].get(st.session_state.current_thread, [])
     for msg in current_messages:
         with st.chat_message(msg["role"]):
             st.markdown(fix_latex_formatting(msg["content"]))
 
-    # User Input
-    if user_query := st.chat_input("Ask a question, request a formula derivation, or submit a problem..."):
+    if user_query := st.chat_input("Ask a question, formula derivation, or technical query..."):
         st.session_state.db["threads"][st.session_state.current_thread].append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
@@ -196,7 +196,7 @@ with tab_chat:
                     api_messages.append({"role": m["role"], "content": m["content"]})
                 
                 if file_context:
-                    api_messages.append({"role": "system", "content": f"User reference materials:\n{file_context}"})
+                    api_messages.append({"role": "system", "content": f"Reference Materials:\n{file_context}"})
 
                 try:
                     completion = client.chat.completions.create(
@@ -224,45 +224,95 @@ with tab_chat:
                     st.error(f"API Error: {str(e)}")
 
 # ------------------------------------------------------------------------------
-# TAB 2: MCQ EVALUATION WORKSPACE
+# VIEW 2: NOTEBOOK WORKSPACE
 # ------------------------------------------------------------------------------
-with tab_mcq:
-    st.header("MCQ Generator & Evaluator")
-    mcq_topic = st.text_input("Enter Topic for MCQ Quiz", "Linear Regression & Mathematical Statistics")
+elif navigation_mode == "📓 Notebook Workspace":
+    st.header("Persistent Study Notebook & Notes")
     
-    if st.button("Generate Practice MCQ"):
-        client = get_openrouter_client()
-        if client:
-            prompt = f"Create a 3-question multiple choice quiz on '{mcq_topic}'. Include questions, 4 options each, correct answers, and LaTeX explanations for math expressions."
-            res = client.chat.completions.create(
-                model=selected_model,
-                messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
-            )
-            quiz_content = fix_latex_formatting(res.choices[0].message.content)
-            st.markdown(quiz_content)
-            
-            st.session_state.db["evaluations"]["mcq"].append({"topic": mcq_topic, "quiz": quiz_content})
+    col_notes, col_preview = st.columns([1, 1])
+    
+    with col_notes:
+        st.subheader("Drafting Canvas")
+        note_title = st.text_input("Note Topic", value="General Linear Models & Regression")
+        existing_content = st.session_state.db["notes"].get(note_title, "")
+        note_body = st.text_area("Write/Edit Note (LaTeX Supported)", value=existing_content, height=400)
+        
+        if st.button("💾 Save Note"):
+            st.session_state.db["notes"][note_title] = note_body
             save_data(st.session_state.db)
+            st.success("Note persistent state saved!")
+
+    with col_preview:
+        st.subheader("Rendered Preview")
+        st.markdown(f"### {note_title}")
+        st.markdown(fix_latex_formatting(note_body))
 
 # ------------------------------------------------------------------------------
-# TAB 3: ESSAY EVALUATION WORKSPACE
+# VIEW 3: MISTAKE TRACKER
 # ------------------------------------------------------------------------------
-with tab_essay:
-    st.header("Essay & Problem Evaluator")
-    essay_text = st.text_area("Paste your solution, response, or essay here", height=200)
-    rubric = st.text_input("Evaluation Focus / Criteria", "Mathematical Accuracy, Clarity, Logic")
+elif navigation_mode == "⚠️ Mistake Tracker":
+    st.header("Mistake & Revision Logging System")
     
-    if st.button("Evaluate Submission"):
-        if essay_text:
+    with st.form("add_mistake"):
+        m_topic = st.text_input("Subject / Topic", "Bayes' Theorem / Conditional Probability")
+        m_desc = st.text_area("Mistake Description or Problem Statement")
+        m_correction = st.text_area("Correct Solution & Formula Derivation")
+        submit_m = st.form_submit_button("Log Mistake")
+        
+        if submit_m and m_desc:
+            st.session_state.db["mistakes"].append({
+                "topic": m_topic,
+                "problem": m_desc,
+                "correction": m_correction
+            })
+            save_data(st.session_state.db)
+            st.success("Logged to mistake register!")
+
+    st.markdown("---")
+    st.subheader("Logged Mistake Register")
+    for idx, item in enumerate(st.session_state.db["mistakes"]):
+        with st.expander(f"#{idx+1} | {item['topic']}"):
+            st.markdown("**Problem:**")
+            st.write(item["problem"])
+            st.markdown("**Correct Derivation / Concept:**")
+            st.markdown(fix_latex_formatting(item["correction"]))
+
+# ------------------------------------------------------------------------------
+# VIEW 4: PRACTICE GENERATOR
+# ------------------------------------------------------------------------------
+elif navigation_mode == "📝 Practice Generator":
+    st.header("Practice & Evaluation Workspace")
+    
+    tab_gen, tab_eval = st.tabs(["📝 Generate Questions", "📄 Solution Evaluator"])
+    
+    with tab_gen:
+        eval_topic = st.text_input("Target Topic for Evaluation", "Maxwell–Boltzmann Speed Distribution")
+        if st.button("Generate Practice Questions"):
             client = get_openrouter_client()
             if client:
-                prompt = f"Evaluate the following text against these criteria: '{rubric}'. Provide score, feedback, and LaTeX formula corrections if relevant.\n\nSubmission:\n{essay_text}"
+                prompt = f"Create a comprehensive study quiz with solutions on '{eval_topic}'. Format all formulas cleanly using double dollar signs for equations and single dollar signs for inline variables."
                 res = client.chat.completions.create(
                     model=selected_model,
                     messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
                 )
-                evaluation_res = fix_latex_formatting(res.choices[0].message.content)
-                st.markdown(evaluation_res)
-                
-                st.session_state.db["evaluations"]["essay"].append({"input": essay_text, "evaluation": evaluation_res})
+                quiz = fix_latex_formatting(res.choices[0].message.content)
+                st.markdown(quiz)
+                st.session_state.db["evaluations"]["mcq"].append({"topic": eval_topic, "quiz": quiz})
                 save_data(st.session_state.db)
+                
+    with tab_eval:
+        user_solution = st.text_area("Paste your technical solution for AI review", height=200)
+        rubric_criteria = st.text_input("Criteria", "Mathematical Rigor, Formula Accuracy")
+        if st.button("Run Evaluation"):
+            if user_solution:
+                client = get_openrouter_client()
+                if client:
+                    prompt = f"Evaluate this solution against '{rubric_criteria}'. Provide score and corrections:\n\n{user_solution}"
+                    res = client.chat.completions.create(
+                        model=selected_model,
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}]
+                    )
+                    eval_out = fix_latex_formatting(res.choices[0].message.content)
+                    st.markdown(eval_out)
+                    st.session_state.db["evaluations"]["essay"].append({"input": user_solution, "evaluation": eval_out})
+                    save_data(st.session_state.db)
