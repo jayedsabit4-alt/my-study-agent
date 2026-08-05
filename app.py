@@ -35,7 +35,7 @@ MATH_SYSTEM_PROMPT = {
         "f(x) = \\dots\n"
         "$$\n"
         "3. Wrap inline math variables/symbols in single dollar signs (e.g., $x = 5$).\n"
-        "4. Render tables using valid Markdown table format with proper alignment rows (|---|---|\n"
+        "4. Render tables using valid Markdown table format with proper alignment rows (|---|---|).\n"
         "5. NEVER output orphan structural tags like \\end{cases} without a matching \\begin{cases}."
     ),
 }
@@ -95,7 +95,7 @@ def get_openrouter_client(api_key):
     from openai import OpenAI
 
     return OpenAI(
-        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=45.0
+        base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=60.0
     )
 
 
@@ -159,6 +159,9 @@ if "active_chat" not in st.session_state:
         existing_chats[0] if existing_chats else "Default Chat"
     )
 
+if "trigger_regenerate" not in st.session_state:
+    st.session_state.trigger_regenerate = False
+
 
 # --- FAST IMAGE COMPRESSION HELPER ---
 def compress_image_to_b64(image_bytes, max_dim=1000, quality=75):
@@ -197,13 +200,12 @@ def extract_file_data(uploaded_file):
                 import pdfplumber
                 with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
                     for page_idx, page in enumerate(pdf.pages):
-                        if page_idx >= 50:
+                        if page_idx >= 40:
                             pdf_text.append("\n[Truncated remaining pages for performance]")
                             break
                         
                         page_content = f"--- Page {page_idx + 1} ---\n"
                         
-                        # 1. Extract tables as Markdown
                         tables = page.extract_tables()
                         md_tables = ""
                         if tables:
@@ -218,7 +220,6 @@ def extract_file_data(uploaded_file):
                                         md_tables += "| " + " | ".join(row_padded[:len(header)]) + " |\n"
                                     md_tables += "\n"
 
-                        # 2. Extract standard text
                         raw_text = page.extract_text() or ""
                         if raw_text:
                             page_content += raw_text + "\n"
@@ -229,13 +230,13 @@ def extract_file_data(uploaded_file):
                             pdf_text.append(page_content)
 
             except Exception:
-                # Fallback Engine: pypdf if pdfplumber is unavailable or fails
+                # Fallback Engine: pypdf if pdfplumber fails
                 from pypdf import PdfReader
                 pdf_stream = io.BytesIO(uploaded_file.getvalue())
                 reader = PdfReader(pdf_stream, strict=False)
 
                 for page_idx, page in enumerate(reader.pages):
-                    if page_idx >= 50:
+                    if page_idx >= 40:
                         pdf_text.append("\n[Truncated remaining pages for performance]")
                         break
                     try:
@@ -388,7 +389,7 @@ if st.session_state.active_mode == "general_chat":
         st.session_state.active_chat, []
     )
 
-    for msg in chat_history:
+    for idx, msg in enumerate(chat_history):
         with st.chat_message(msg["role"]):
             if msg.get("file_names"):
                 st.caption(f"📎 Attached Context: {', '.join(msg['file_names'])}")
@@ -396,6 +397,13 @@ if st.session_state.active_mode == "general_chat":
             if msg["role"] == "assistant":
                 with st.expander("📋 Copy Raw Text"):
                     st.code(msg["content"], language="markdown")
+
+    # --- REGENERATE BUTTON FOR LAST QUERY ---
+    if chat_history and chat_history[-1]["role"] in ["user", "assistant"]:
+        col_reg, _ = st.columns([2, 5])
+        if col_reg.button("🔄 Regenerate / Retry Response", key="btn_regen_chat"):
+            st.session_state.trigger_regenerate = True
+            st.rerun()
 
     st.markdown("---")
 
@@ -419,7 +427,23 @@ if st.session_state.active_mode == "general_chat":
 
     user_query = st.chat_input("Ask anything, request a math derivation, or submit a problem...")
 
+    # Handle standard prompt OR Regenerate button click
+    should_process = False
     if user_query:
+        should_process = True
+        st.session_state.trigger_regenerate = False
+    elif st.session_state.trigger_regenerate and chat_history:
+        should_process = True
+        st.session_state.trigger_regenerate = False
+        
+        # If last message was assistant/error, remove it before regenerating
+        if chat_history[-1]["role"] == "assistant":
+            chat_history.pop()
+        
+        if chat_history and chat_history[-1]["role"] == "user":
+            user_query = chat_history[-1]["content"]
+
+    if should_process and user_query:
         if not st.session_state.get("saved_openrouter_key"):
             st.error("Please enter an OpenRouter API key in the sidebar first!")
         else:
@@ -436,17 +460,17 @@ if st.session_state.active_mode == "general_chat":
                     if f_data.get("image_url"):
                         image_urls.append(f_data["image_url"])
 
-            # Store ONLY user query and file badge in display content
-            user_msg_record = {
-                "role": "user",
-                "content": user_query,
-                "context": temp_file_text,
-                "file_names": file_names_list
-            }
-
-            chat_history.append(user_msg_record)
-            st.session_state.db["chats"][st.session_state.active_chat] = chat_history
-            save_data(st.session_state.db)
+            # Save clean message to chat history if new input
+            if not (st.session_state.trigger_regenerate and chat_history[-1]["role"] == "user"):
+                user_msg_record = {
+                    "role": "user",
+                    "content": user_query,
+                    "context": temp_file_text,
+                    "file_names": file_names_list
+                }
+                chat_history.append(user_msg_record)
+                st.session_state.db["chats"][st.session_state.active_chat] = chat_history
+                save_data(st.session_state.db)
 
             with st.chat_message("user"):
                 if file_names_list:
@@ -458,11 +482,10 @@ if st.session_state.active_mode == "general_chat":
                     response_placeholder = st.empty()
                     full_response = ""
 
-                    # Build API context without cluttering the UI
+                    # Clean history construction - pass text without bloating context window
                     api_messages = [MATH_SYSTEM_PROMPT]
                     for m in chat_history[-6:-1]:
-                        m_text = f"{m['content']}\n\n{m.get('context', '')}".strip()
-                        api_messages.append({"role": m["role"], "content": m_text})
+                        api_messages.append({"role": m["role"], "content": m["content"]})
 
                     latest_prompt = f"{user_query}\n\n{temp_file_text}".strip()
                     if image_urls:
@@ -491,7 +514,7 @@ if st.session_state.active_mode == "general_chat":
 
                         cleaned_final = fix_latex_formatting(full_response)
                         if not cleaned_final.strip():
-                            cleaned_final = "*(Model returned empty response. Please try another model.)*"
+                            cleaned_final = "*(Model returned empty response. Please try switching models.)*"
 
                         response_placeholder.markdown(cleaned_final)
                         status.update(label="✅ Response Done!", state="complete")
@@ -502,8 +525,12 @@ if st.session_state.active_mode == "general_chat":
                         st.rerun()
 
                     except Exception as e:
-                        status.update(label="❌ Error occurred", state="error")
-                        st.error(f"Execution Error: {str(e)}")
+                        status.update(label="❌ API Error Occurred", state="error")
+                        err_msg = f"⚠️ **Execution Error**: `{str(e)}`\n\n*Tip: Try clicking '🔄 Regenerate' or switch to another model in the dropdown above.*"
+                        st.error(err_msg)
+                        chat_history.append({"role": "assistant", "content": err_msg})
+                        st.session_state.db["chats"][st.session_state.active_chat] = chat_history
+                        save_data(st.session_state.db)
 
 # ==========================================
 # VIEW 2: NOTEBOOK WORKSPACES
