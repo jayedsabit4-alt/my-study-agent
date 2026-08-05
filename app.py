@@ -10,11 +10,9 @@ from PIL import Image
 import streamlit as st
 
 
-
 import streamlit as st
-import streamlit.components.v1 as components
 
-# 1. Page Configuration (Wide layout removes heavy centered margins)
+# 1. Page Configuration
 st.set_page_config(
     page_title="AI Study Notebook",
     page_icon="🎓",
@@ -22,115 +20,84 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# 2. Custom CSS: Flush-left alignment, locked horizontal scroll, and mobile optimization
+# 2. Custom CSS: Fixes Math LaTeX, Keeps Sidebar Buttons Inline, Locks Viewport
 st.markdown(
     """
     <style>
-    /* Stop horizontal screen wobbling */
+    /* 1. LOCK VIEWPORT & PREVENT WOBBLE */
     html, body, [data-testid="stAppViewContainer"], .main {
         overflow-x: hidden !important;
         max-width: 100vw !important;
     }
 
-    /* Shift main block container flush to the left */
     .block-container {
         padding-top: 3rem !important;
         padding-bottom: 5rem !important;
         padding-left: 0.5rem !important;
         padding-right: 0.5rem !important;
-        margin-left: 0 !important;
-        margin-right: 0 !important;
         max-width: 100% !important;
     }
 
-    /* Force headers, paragraphs, and list items to align strictly to the left edge */
-    h1, h2, h3, h4, h5, h6, p, ul, ol, li, .stMarkdown {
-        text-align: left !important;
-        margin-left: 0 !important;
+    /* 2. FIX LATEX FORMULAS (Prevents vertical character stacking) */
+    .katex, .katex *, .katex-display, .katex-display *, .MathJax, .MathJax * {
+        white-space: nowrap !important;
+        word-break: normal !important;
+        overflow-wrap: normal !important;
+        line-height: normal !important;
+    }
+    
+    .katex-display {
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        padding: 0.4em 0 !important;
+        margin: 0.5em 0 !important;
     }
 
-    /* Keep bullet points compact without huge indents */
-    ul, ol {
-        padding-left: 1.1rem !important;
-        margin-left: 0 !important;
+    /* 3. FIX SIDEBAR THREADS (Forces Thread Name + Delete Button onto 1 Line) */
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+        gap: 0.25rem !important;
     }
 
-    /* Keep top sidebar toggle button visible */
-    header[data-testid="stHeader"] {
-        background-color: transparent !important;
-        z-index: 99999 !important;
+    [data-testid="stSidebar"] [data-testid="column"] {
+        width: auto !important;
+        min-width: 0 !important;
     }
 
-    /* Force text wrapping to prevent right overflow */
-    * {
-        box-sizing: border-box !important;
+    [data-testid="stSidebar"] [data-testid="column"]:first-child {
+        flex: 1 1 80% !important;
     }
-    p, span, div, code, pre {
+
+    [data-testid="stSidebar"] [data-testid="column"]:last-child {
+        flex: 0 0 20% !important;
+    }
+
+    [data-testid="stSidebar"] .stButton > button {
+        padding: 0.25rem 0.5rem !important;
+        height: 38px !important;
+        font-size: 14px !important;
+        white-space: nowrap !important;
+        text-overflow: ellipsis !important;
+        overflow: hidden !important;
+    }
+
+    /* 4. SAFE TEXT WRAPPING FOR REGULAR PROSE ONLY */
+    p, li, h1, h2, h3, h4 {
         white-space: pre-wrap !important;
         word-break: break-word !important;
         overflow-wrap: anywhere !important;
     }
 
-    /* Mobile rounded inputs and action buttons */
-    .stTextInput > div > div > input, .stTextArea textarea {
-        border-radius: 16px !important;
-        max-width: 100% !important;
-    }
-
-    .stButton > button {
-        border-radius: 16px !important;
-        width: 100% !important;
+    header[data-testid="stHeader"] {
+        background-color: transparent !important;
+        z-index: 99999 !important;
     }
     </style>
 """,
     unsafe_allow_html=True,
 )
-
-# 3. Floating "Scroll to Bottom" Button (Fixed at Bottom-Right)
-components.html(
-    """
-    <style>
-    #scroll-down-btn {
-        position: fixed;
-        bottom: 25px;
-        right: 20px;
-        z-index: 999999;
-        background-color: #3b82f6;
-        color: white;
-        border: none;
-        border-radius: 50%;
-        width: 46px;
-        height: 46px;
-        font-size: 22px;
-        font-weight: bold;
-        box-shadow: 0px 4px 12px rgba(0,0,0,0.35);
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        -webkit-tap-highlight-color: transparent;
-    }
-    #scroll-down-btn:active {
-        transform: scale(0.90);
-        background-color: #1d4ed8;
-    }
-    </style>
-    
-    <button id="scroll-down-btn" onclick="scrollToBottom()">↓</button>
-
-    <script>
-    function scrollToBottom() {
-        const mainContainer = window.parent.document.querySelector('[data-testid="stAppViewContainer"]') || window.parent.document.documentElement;
-        mainContainer.scrollTo({
-            top: mainContainer.scrollHeight,
-            behavior: 'smooth'
-        });
-    }
-    </script>
-    """,
-    height=0,
-)
-
 # Optional sklearn dependency for local RAG vector similarity
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
