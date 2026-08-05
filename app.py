@@ -29,36 +29,38 @@ MATH_SYSTEM_PROMPT = {
     "role": "system",
     "content": (
         "You are an expert academic assistant. When rendering formatting and mathematical notation:\n"
-        "1. ALWAYS place markdown headers (e.g., ### Section) and horizontal rules (---) on separate lines with BLANK LINES before and after.\n"
+        "1. ALWAYS place markdown headers (e.g., ### Section) on separate lines with BLANK LINES before and after.\n"
         "2. Put standalone display math equations inside double dollar signs on their OWN separate lines:\n"
         "$$\n"
         "f(x) = \\dots\n"
         "$$\n"
         "3. Wrap inline math variables/symbols in single dollar signs (e.g., $x = 5$).\n"
-        "4. NEVER output orphan structural tags like \\end{cases} without a matching \\begin{cases}.\n"
-        "5. NEVER stream section headers and LaTeX equations together on a single continuous line."
+        "4. Render tables using valid Markdown table format with proper alignment rows (|---|---|\n"
+        "5. NEVER output orphan structural tags like \\end{cases} without a matching \\begin{cases}."
     ),
 }
 
 
 # --- ADVANCED LATEX & MARKDOWN FORMAT SANITIZER ---
 def fix_latex_formatting(text: str) -> str:
-    """Cleans raw LLM outputs, separates squished headers, and fixes KaTeX rendering bugs."""
+    """Cleans raw LLM outputs, separates squished headers, and fixes KaTeX & Table rendering bugs."""
     if not text:
         return ""
 
-    # 1. Force newline spacing around markdown headers and horizontal rules
+    # 1. Force newline spacing around markdown headers
     text = re.sub(r"(?<!\n)(###?\s+)", r"\n\n\1", text)
-    text = re.sub(r"(?<!\n)(---\s*)", r"\n\n\1", text)
     text = re.sub(r"(\\end\{[a-zA-Z]+\})\s*(###?|---)", r"\1\n\n\2", text)
 
-    # 2. Convert bracket notations [ ... ] and \( ... \) to standard dollar signs
+    # 2. Fix standalone horizontal rules WITHOUT breaking markdown tables (|---|---|)
+    text = re.sub(r"(?<![|\w\n])\n?^\s*---\s*$(?![|\w])", r"\n\n---\n\n", text, flags=re.MULTILINE)
+
+    # 3. Convert bracket notations [ ... ] and \( ... \) to standard dollar signs
     text = re.sub(r"\\\[\s*(.*?)\s*\\\]", r"\n$$\1$$\n", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\w)\[\s*(\\.*?)\s*\]", r"\n$$\1$$\n", text, flags=re.DOTALL)
     text = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"$\1$", text, flags=re.DOTALL)
     text = re.sub(r"(?<!\w)\(\s*(\\.*?)\s*\)", r"$\1$", text, flags=re.DOTALL)
 
-    # 3. Fix nested or double $$ tags around alignment environments
+    # 4. Fix nested or double $$ tags around alignment environments
     text = re.sub(
         r"\$\$\s*(\\begin\{(aligned|equation|gather|alignat|matrix|bmatrix|cases|array)\})",
         r"\n$$\n\1",
@@ -70,7 +72,7 @@ def fix_latex_formatting(text: str) -> str:
         text,
     )
 
-    # 4. Clean orphan \end{cases} tags missing their starting \begin{cases}
+    # 5. Clean orphan \end{cases} tags missing their starting \begin{cases}
     if "\\end{cases}" in text and "\\begin{cases}" not in text:
         text = text.replace("\\end{cases}", "")
 
@@ -175,9 +177,9 @@ def compress_image_to_b64(image_bytes, max_dim=1000, quality=75):
         return f"data:image/jpeg;base64,{b64_str}"
 
 
-# --- FAULT-TOLERANT FILE EXTRACTOR ---
+# --- HIGH-QUALITY TABLE & TEXT PDF EXTRACTOR ---
 def extract_file_data(uploaded_file):
-    """Extracts text and image payload with crash protection for corrupted/truncated PDFs."""
+    """Extracts structured text and markdown tables with multi-engine PDF parsing."""
     file_type = uploaded_file.name.split(".")[-1].lower()
     extracted_text = ""
     image_url = None
@@ -188,10 +190,47 @@ def extract_file_data(uploaded_file):
             extracted_text = f"[Image Document: {uploaded_file.name}]"
 
         elif file_type == "pdf":
-            from pypdf import PdfReader
-
             pdf_text = []
+            
+            # Primary Engine: Try pdfplumber for table and layout extraction
             try:
+                import pdfplumber
+                with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
+                    for page_idx, page in enumerate(pdf.pages):
+                        if page_idx >= 50:
+                            pdf_text.append("\n[Truncated remaining pages for performance]")
+                            break
+                        
+                        page_content = f"--- Page {page_idx + 1} ---\n"
+                        
+                        # 1. Extract tables as Markdown
+                        tables = page.extract_tables()
+                        md_tables = ""
+                        if tables:
+                            for tbl in tables:
+                                clean_rows = [[str(cell or '').strip().replace('\n', ' ') for cell in row] for row in tbl if any(row)]
+                                if len(clean_rows) > 1:
+                                    header = clean_rows[0]
+                                    md_tables += "\n| " + " | ".join(header) + " |\n"
+                                    md_tables += "| " + " | ".join(["---"] * len(header)) + " |\n"
+                                    for row in clean_rows[1:]:
+                                        row_padded = row + [""] * (len(header) - len(row))
+                                        md_tables += "| " + " | ".join(row_padded[:len(header)]) + " |\n"
+                                    md_tables += "\n"
+
+                        # 2. Extract standard text
+                        raw_text = page.extract_text() or ""
+                        if raw_text:
+                            page_content += raw_text + "\n"
+                        if md_tables:
+                            page_content += "\n**Extracted Tables:**\n" + md_tables
+                            
+                        if page_content.strip():
+                            pdf_text.append(page_content)
+
+            except Exception:
+                # Fallback Engine: pypdf if pdfplumber is unavailable or fails
+                from pypdf import PdfReader
                 pdf_stream = io.BytesIO(uploaded_file.getvalue())
                 reader = PdfReader(pdf_stream, strict=False)
 
@@ -202,15 +241,12 @@ def extract_file_data(uploaded_file):
                     try:
                         txt = page.extract_text()
                         if txt:
-                            pdf_text.append(txt)
+                            pdf_text.append(f"--- Page {page_idx + 1} ---\n" + txt)
                     except Exception:
                         continue
 
-            except Exception as stream_err:
-                pdf_text.append(f"[Partial PDF Recovery: Stream error ({str(stream_err)})]")
-
             extracted_text = (
-                "\n".join(pdf_text)
+                "\n\n".join(pdf_text)
                 if pdf_text
                 else "[Scanned/Handwritten or unreadable PDF Content]"
             )
@@ -354,6 +390,8 @@ if st.session_state.active_mode == "general_chat":
 
     for msg in chat_history:
         with st.chat_message(msg["role"]):
+            if msg.get("file_names"):
+                st.caption(f"📎 Attached Context: {', '.join(msg['file_names'])}")
             st.markdown(fix_latex_formatting(msg["content"]))
             if msg["role"] == "assistant":
                 with st.expander("📋 Copy Raw Text"):
@@ -389,43 +427,51 @@ if st.session_state.active_mode == "general_chat":
 
             temp_file_text = ""
             image_urls = []
+            file_names_list = []
             if attached_files:
                 for f in attached_files:
                     f_data = extract_file_data(f)
-                    temp_file_text += f"\n\n--- Attached File: {f_data['name']} ---\n{f_data['text']}"
+                    file_names_list.append(f_data['name'])
+                    temp_file_text += f"\n\n--- Attached File Context: {f_data['name']} ---\n{f_data['text']}"
                     if f_data.get("image_url"):
                         image_urls.append(f_data["image_url"])
 
-            full_prompt = (
-                f"{user_query}\n{temp_file_text}" if temp_file_text else user_query
-            )
+            # Store ONLY user query and file badge in display content
+            user_msg_record = {
+                "role": "user",
+                "content": user_query,
+                "context": temp_file_text,
+                "file_names": file_names_list
+            }
 
-            chat_history.append({"role": "user", "content": full_prompt})
-            st.session_state.db["chats"][st.session_state.active_chat] = (
-                chat_history
-            )
+            chat_history.append(user_msg_record)
+            st.session_state.db["chats"][st.session_state.active_chat] = chat_history
             save_data(st.session_state.db)
 
             with st.chat_message("user"):
-                st.markdown(full_prompt)
+                if file_names_list:
+                    st.caption(f"📎 Attached Context: {', '.join(file_names_list)}")
+                st.markdown(user_query)
 
             with st.chat_message("assistant"):
                 with st.status("🧠 AI is thinking...", expanded=True) as status:
                     response_placeholder = st.empty()
                     full_response = ""
 
-                    api_messages = [MATH_SYSTEM_PROMPT] + [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in chat_history[-6:-1]
-                    ]
+                    # Build API context without cluttering the UI
+                    api_messages = [MATH_SYSTEM_PROMPT]
+                    for m in chat_history[-6:-1]:
+                        m_text = f"{m['content']}\n\n{m.get('context', '')}".strip()
+                        api_messages.append({"role": m["role"], "content": m_text})
 
+                    latest_prompt = f"{user_query}\n\n{temp_file_text}".strip()
                     if image_urls:
-                        user_content = [{"type": "text", "text": full_prompt}]
+                        user_content = [{"type": "text", "text": latest_prompt}]
                         for img_url in image_urls[:2]:
                             user_content.append({"type": "image_url", "image_url": {"url": img_url}})
                         api_messages.append({"role": "user", "content": user_content})
                     else:
-                        api_messages.append({"role": "user", "content": full_prompt})
+                        api_messages.append({"role": "user", "content": latest_prompt})
 
                     try:
                         response = client.chat.completions.create(
@@ -451,9 +497,7 @@ if st.session_state.active_mode == "general_chat":
                         status.update(label="✅ Response Done!", state="complete")
 
                         chat_history.append({"role": "assistant", "content": cleaned_final})
-                        st.session_state.db["chats"][st.session_state.active_chat] = (
-                            chat_history
-                        )
+                        st.session_state.db["chats"][st.session_state.active_chat] = chat_history
                         save_data(st.session_state.db)
                         st.rerun()
 
@@ -587,7 +631,6 @@ elif st.session_state.active_mode == "notebook_studio":
                             st.session_state.saved_openrouter_key
                         )
 
-                        # Aggregate context from ALL saved sources in this notebook
                         saved_sources_text = ""
                         image_urls = []
                         for src_item in sub_data.get("sources", []):
@@ -621,7 +664,7 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
 1. Target the chapter concepts in saved source materials and past logged weaknesses.
 2. If handwritten images or scanned notes are attached, perform OCR and generate questions directly from the text.
 3. DO NOT repeat exact duplicate questions from past mistakes; create NEW variations or deeper questions testing those concepts.
-4. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math.
+4. Use proper LaTeX notation ($...$ inline, $$...$$ block) for math and valid Markdown tables.
 5. Output STRICT raw JSON array format without markdown backticks:
 [
   {{"id": 1, "question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "correct": "A) ...", "explanation": "..."}}
@@ -822,7 +865,6 @@ GENERATE A QUIZ FOLLOWING THESE RULES:
                 else:
                     client = get_openrouter_client(st.session_state.saved_openrouter_key)
 
-                    # Aggregate context from ALL saved sources in this notebook
                     saved_sources_text = ""
                     image_urls = []
                     for src_item in w_sub_data.get("sources", []):
