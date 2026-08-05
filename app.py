@@ -16,8 +16,36 @@ st.set_page_config(
 
 DATA_FILE = "study_data.json"
 
-# --- OPENROUTER DYNAMIC FREE MODEL ---
-MODEL_FREE = "openrouter/free"
+# --- CURATED FREE MODEL POOL WITH SPECIALTY TAGS ---
+MODEL_OPTIONS = {
+    "Auto-Router [Best Active Free Model]": "openrouter/free",
+    "Nvidia Nemotron 3 Ultra [Best Reasoning & Explanations]": (
+        "nvidia/nemotron-3-ultra-550b-a55b:free"
+    ),
+    "Poolside Laguna S 2.1 [Best Code Generator & Programming]": (
+        "poolside/laguna-s-2.1:free"
+    ),
+    "Google Gemma 4 31B [Best Document & Vision Tasks]": (
+        "google/gemma-4-31b-it:free"
+    ),
+    "OpenAI GPT-OSS 20B [Fast & Lightweight]": "openai/gpt-oss-20b:free",
+    "InclusionAI Ling 3.0 Flash [Fast Agentic Tasks]": (
+        "inclusionai/ling-3.0-flash:free"
+    ),
+}
+
+# Math formatting system prompt
+MATH_SYSTEM_PROMPT = {
+    "role": "system",
+    "content": (
+        "When rendering mathematical variables, formulas, or statistical"
+        " notation, ALWAYS wrap them in standard LaTeX dollar signs. Use"
+        " single dollar signs for inline math (e.g., $\\mu$, $\\bar{x}$,"
+        " $\\theta$, $N$, $f(x)$) and double dollar signs for standalone"
+        " equations ($$...$$). Never output raw unescaped math commands like"
+        " (\\mu) or (\\theta)."
+    ),
+}
 
 
 # --- PERSISTENCE LOGIC ---
@@ -25,8 +53,7 @@ def load_data():
   if os.path.exists(DATA_FILE):
     try:
       with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        return data
+        return json.load(f)
     except Exception:
       pass
   return {
@@ -66,9 +93,7 @@ def process_uploaded_file(uploaded_file):
 
   try:
     if file_type in ["png", "jpg", "jpeg"]:
-      extracted_text += (
-          f"[Image attached: {uploaded_file.name} - Processing via Vision]"
-      )
+      extracted_text += f"[Image attached: {uploaded_file.name}]"
     elif file_type == "pdf":
       reader = PdfReader(uploaded_file)
       for page in reader.pages:
@@ -96,13 +121,13 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   doc.add_heading(f"{section_type} Revision Guide: {subject_name}", level=0)
 
   if not mistakes_list:
-    doc.add_paragraph("No weak spots or feedback logged yet.")
+    doc.add_paragraph("No weak spots logged yet.")
   for item in mistakes_list:
     p = doc.add_paragraph(style="List Bullet")
     p.add_run(f"[{item.get('date', 'N/A')}] ").bold = True
     p.add_run(f"{item.get('concept', item.get('area', 'Topic'))}\n")
     p.add_run(
-        f"Feedback/Takeaway: {item.get('takeaway', item.get('correction', 'N/A'))}"
+        f"Takeaway: {item.get('takeaway', item.get('correction', 'N/A'))}"
     )
 
   filename = f"{subject_name}_{section_type}_Revision.docx"
@@ -110,7 +135,7 @@ def generate_docx(subject_name, mistakes_list, section_type="MCQ"):
   return filename
 
 
-# --- SIDEBAR: OPENROUTER AUTH & THREAD MANAGEMENT ---
+# --- SIDEBAR NAVIGATION & MODEL SELECTOR ---
 with st.sidebar:
   st.title("🎓 OpenRouter Studio")
 
@@ -136,6 +161,15 @@ with st.sidebar:
 
   st.divider()
 
+  selected_label = st.selectbox(
+      "🤖 Select AI Model",
+      options=list(MODEL_OPTIONS.keys()),
+      index=0,
+  )
+  selected_model_slug = MODEL_OPTIONS[selected_label]
+
+  st.divider()
+
   st.subheader("📌 Navigation")
   nav_choice = st.radio(
       "Select View", ["💬 General Chat", "📚 Notebook Workspaces"]
@@ -148,7 +182,6 @@ with st.sidebar:
 
   st.divider()
 
-  # --- THREADS & RENAME / DELETE SECTION ---
   if st.session_state.active_mode == "general_chat":
     col_c1, col_c2 = st.columns([3, 1])
     col_c1.subheader("💬 Threads")
@@ -203,14 +236,11 @@ if st.session_state.active_mode == "general_chat":
       st.session_state.active_chat, []
   )
 
-  # Display Messages + Copy Feature
-  for idx, msg in enumerate(chat_history):
+  # Clean display without duplicate code copy blocks
+  for msg in chat_history:
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
-      if msg["role"] == "assistant":
-        st.code(msg["content"], language="markdown")
 
-  # File Attachment Widget
   attached_file = st.file_uploader(
       "Attach File (Image, PDF, Docx, CSV, Excel)",
       type=["png", "jpg", "jpeg", "pdf", "docx", "csv", "xlsx"],
@@ -231,19 +261,18 @@ if st.session_state.active_mode == "general_chat":
       st.markdown(full_prompt)
 
     with st.chat_message("assistant"):
-      # Generation Status Indicator
       with st.status("🧠 AI is thinking & generating...", expanded=True) as status:
         response_placeholder = st.empty()
         full_response = ""
 
-        api_messages = [
+        api_messages = [MATH_SYSTEM_PROMPT] + [
             {"role": m["role"], "content": m["content"]}
             for m in chat_history[-6:]
         ]
 
         try:
           response = client.chat.completions.create(
-              model=MODEL_FREE,
+              model=selected_model_slug,
               messages=api_messages,
               stream=True,
           )
@@ -254,7 +283,6 @@ if st.session_state.active_mode == "general_chat":
               response_placeholder.markdown(full_response + " ▌")
 
           response_placeholder.markdown(full_response)
-          st.code(full_response, language="markdown")
           status.update(label="✅ Generation Complete!", state="complete")
 
           chat_history.append({"role": "assistant", "content": full_response})
@@ -262,12 +290,11 @@ if st.session_state.active_mode == "general_chat":
               chat_history
           )
 
-          # Auto Title Generation if this is the first message
           if len(chat_history) == 2 and st.session_state.active_chat.startswith(
               "Chat "
           ):
             title_res = client.chat.completions.create(
-                model=MODEL_FREE,
+                model=selected_model_slug,
                 messages=[{
                     "role": "user",
                     "content": (
@@ -350,8 +377,11 @@ elif st.session_state.active_mode == "notebook_studio":
           with st.status("🧠 Generating Quiz Questions...", expanded=True):
             try:
               res = client.chat.completions.create(
-                  model=MODEL_FREE,
-                  messages=[{"role": "user", "content": prompt}],
+                  model=selected_model_slug,
+                  messages=[
+                      MATH_SYSTEM_PROMPT,
+                      {"role": "user", "content": prompt},
+                  ],
               )
               raw_text = (
                   res.choices[0]
@@ -425,7 +455,6 @@ elif st.session_state.active_mode == "notebook_studio":
     if selected_w_sub and selected_w_sub != "None":
       w_sub_data = st.session_state.db["written_subjects"][selected_w_sub]
 
-      # Timer & Custom Prompt Instructions Section
       st.subheader("⏱️ Timer & Custom Evaluation Rules")
       custom_instructions = st.text_area(
           "Custom Prompt / Rules for Evaluation",
@@ -459,8 +488,11 @@ elif st.session_state.active_mode == "notebook_studio":
         with st.status("🧠 AI is Evaluating Your Essay...", expanded=True):
           try:
             res = client.chat.completions.create(
-                model=MODEL_FREE,
-                messages=[{"role": "user", "content": prompt}],
+                model=selected_model_slug,
+                messages=[
+                    MATH_SYSTEM_PROMPT,
+                    {"role": "user", "content": prompt},
+                ],
             )
             raw_text = (
                 res.choices[0]
